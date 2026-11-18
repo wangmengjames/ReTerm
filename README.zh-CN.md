@@ -19,7 +19,7 @@ ReTerm 是一个很小的 macOS 菜单栏工具。点一下，关掉所有 Termi
 ## 功能
 
 - **实时会话列表**：列出每个正在运行的 Claude Code 会话，显示它在做什么（*Permission request* 权限请求、*Your turn* 等你回复、*Working* 运行中）、在哪个 App 里、持续了多久。点一下就跳到它的窗口：精确到 Terminal 或 iTerm2 的那个标签页、打开着那个文件夹的 VS Code 窗口，或者 Claude App 里的那个会话。
-- **标记为已完成**：在菜单里按住 ⌥（Option），Terminal 会话那一行会变成 **Finished: Save & Close**。点一下就把它存进 **Finished today** 并关掉窗口，之后随时可以从那里重新打开，对话自动恢复。如果会话还在工作，会先问你。
+- **标记为已完成**：在 **Mark as Finished** 子菜单里点一个 Terminal 会话（或者按住 ⌥ Option 点那一行），就把它存进 **Finished today** 并关掉窗口，之后随时可以从那里重新打开，对话自动恢复。如果会话还在工作，会先问你。
 - **需要你处理的数量**：菜单栏图标旁边的数字，是停在权限请求或问题上、等你处理的会话数。
 - **Hide Session Titles**：用文件夹名代替会话标题，适合共享屏幕时使用。
 - **Save & Close All Terminal Windows**：记录所有打开的 Terminal 标签页后全部关闭。如果有 Claude 会话还在工作，会先提醒。

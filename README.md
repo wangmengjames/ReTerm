@@ -23,7 +23,7 @@ If you run several Claude Code sessions at once, you end up with a wall of Termi
 ## Features
 
 - **Live sessions**: every running Claude Code session with what it is doing (*Permission request*, *Your turn*, *Working*), where it runs and for how long. Click one to bring its window to the front: the exact Terminal or iTerm2 tab, the VS Code window holding its folder, or the session in the Claude app.
-- **Mark one finished**: hold ⌥ (Option) in the menu and a Terminal session's row becomes **Finished: Save & Close**. One click saves it under **Finished today** and closes its window; reopen it from there whenever you like, with the conversation resumed. A session that is still working asks first.
+- **Mark one finished**: pick a Terminal session under **Mark as Finished** (or hold ⌥ Option and click its row). It is saved under **Finished today** and its window closes; reopen it from there whenever you like, with the conversation resumed. A session that is still working asks first.
 - **A count of sessions that need you**: the number next to the menu bar icon is how many sessions are stopped on a permission prompt or a question.
 - **Hide Session Titles**: shows folder names instead of session titles, for screen sharing.
 - **Save & Close All Terminal Windows**: records every open Terminal tab, then closes them. Warns you first if a Claude session is still working.

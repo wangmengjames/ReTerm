@@ -123,8 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let live = scanLiveSessions(includeTitles: !hideTitles)
         shownLive = Dictionary(live.map { ($0.sessionId, $0) }, uniquingKeysWith: { a, _ in a })
         refreshBadge()
-        let head = NSMenuItem(title: live.isEmpty ? "No Claude Code sessions running"
-                                : "Claude Code Sessions (\(live.count))  ·  hold ⌥ to finish one",
+        let head = NSMenuItem(title: live.isEmpty ? "No Claude Code sessions running" : "Claude Code Sessions (\(live.count))",
                               action: nil, keyEquivalent: "")
         head.isEnabled = false
         menu.addItem(head)
@@ -147,12 +146,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(i)
             menu.addItem(finishItem(for: session))
         }
+        if !live.isEmpty { menu.addItem(finishMenu(for: live)) }
+    }
+
+    /// Only a Terminal session can be closed and later resumed with `claude --resume`.
+    private func isFinishable(_ session: LiveSession) -> Bool {
+        guard session.hostKind == .terminal, case .terminal(let app, _) = session.jump else { return false }
+        return app == "Terminal"
+    }
+
+    /// "Mark as Finished ▸": every Terminal session, one click each. Visible, no key to hold.
+    private func finishMenu(for live: [LiveSession]) -> NSMenuItem {
+        let parent = NSMenuItem(title: "Mark as Finished", action: nil, keyEquivalent: "")
+        parent.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: "Mark as Finished")
+        let sub = NSMenu()
+        sub.autoenablesItems = false
+        let finishable = live.filter(isFinishable)
+        for session in finishable {
+            let i = item("\(shown(session.title, cwd: session.cwd))  —  \(statusText(session))", #selector(finishSession(_:)))
+            i.image = statusImage(session.status)
+            i.representedObject = session.sessionId
+            i.toolTip = "Close this session's window and keep it under Finished, ready to reopen."
+            sub.addItem(i)
+        }
+        if finishable.isEmpty {
+            let none = NSMenuItem(title: "No Terminal sessions to finish", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            sub.addItem(none)
+        }
+        sub.addItem(.separator())
+        let note = NSMenuItem(title: "Saves it under Finished and closes its window", action: nil, keyEquivalent: "")
+        note.isEnabled = false
+        sub.addItem(note)
+        if finishable.count < live.count {
+            let other = NSMenuItem(title: "Sessions in other apps can’t be closed from here", action: nil, keyEquivalent: "")
+            other.isEnabled = false
+            sub.addItem(other)
+        }
+        parent.submenu = sub
+        return parent
     }
 
     private func finishItem(for session: LiveSession) -> NSMenuItem {
         let name = shown(session.title, cwd: session.cwd)
         let finish: NSMenuItem
-        if session.hostKind == .terminal, case .terminal(let app, _) = session.jump, app == "Terminal" {
+        if isFinishable(session) {
             finish = item("Finished: Save & Close “\(name)”", #selector(finishSession(_:)))
             finish.representedObject = session.sessionId
             finish.toolTip = "Close this session's window and keep it under Finished, ready to reopen."
