@@ -1,4 +1,6 @@
-# ReTerm
+<p align="center"><img src="docs/icon.png" width="128" alt="ReTerm icon"></p>
+
+<h1 align="center">ReTerm</h1>
 
 **给 Terminal 窗口和 Claude Code 会话用的"重新打开关闭的标签页"。**
 

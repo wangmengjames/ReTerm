@@ -1,4 +1,6 @@
-# ReTerm
+<p align="center"><img src="docs/icon.png" width="128" alt="ReTerm icon"></p>
+
+<h1 align="center">ReTerm</h1>
 
 **"Reopen closed tab", for Terminal windows and Claude Code sessions.**
 
