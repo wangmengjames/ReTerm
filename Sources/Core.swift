@@ -426,6 +426,7 @@ func detectTerminalTabs(includeTopics: Bool = true) -> [Entry] {
     for p in procs { children[p.ppid, default: []].append(p) }
 
     var entries: [Entry] = []
+    var codexTabs: [(index: Int, pid: Int32)] = []
     for login in logins.sorted(by: { $0.tty < $1.tty }) {
         var descendants: [Proc] = []
         var queue = children[login.pid] ?? []
@@ -444,15 +445,21 @@ func detectTerminalTabs(includeTopics: Bool = true) -> [Entry] {
                                  sessionId: s.sessionId, name: s.name, status: s.status, topic: topic))
         } else if let codex = descendants.first(where: { ($0.comm as NSString).lastPathComponent == "codex" }) {
             let cwd = workingDirectory(of: codex.pid) ?? NSHomeDirectory()
-            let id = Codex.sessionId(pid: codex.pid, cwd: cwd)
-            let topic = includeTopics ? (id.flatMap { Codex.topic(sessionId: $0) } ?? "") : nil
-            entries.append(Entry(kind: "codex", cwd: cwd, tty: login.tty, sessionId: id, topic: topic))
+            codexTabs.append((entries.count, codex.pid))
+            entries.append(Entry(kind: "codex", cwd: cwd, tty: login.tty))
         } else if let outer = descendants.first {
             // The innermost process is where the user actually is (e.g. a shell started by a script).
             let inner = descendants.last ?? outer
             let cwd = workingDirectory(of: inner.pid) ?? workingDirectory(of: outer.pid) ?? NSHomeDirectory()
             entries.append(Entry(kind: "shell", cwd: cwd, tty: login.tty))
         }
+    }
+    // All Codex tabs are matched to their sessions together, so two tabs never claim the same one.
+    let codexIds = Codex.sessionIds(for: codexTabs.map { (pid: $0.pid, cwd: entries[$0.index].cwd) })
+    for tab in codexTabs {
+        let id = codexIds[tab.pid]
+        entries[tab.index].sessionId = id
+        entries[tab.index].topic = includeTopics ? (id.flatMap { Codex.topic(sessionId: $0) } ?? "") : nil
     }
     return entries
 }
@@ -501,8 +508,12 @@ func reopen(_ entry: Entry) -> Bool {
     let config = NSWorkspace.OpenConfiguration()
     try? FileManager.default.removeItem(at: ttyReportFile(for: entry))
     NSWorkspace.shared.open([file], withApplicationAt: terminal, configuration: config)
-    if let bounds = entry.bounds, isOnScreen(bounds) {
-        Placement.place(reportFile: ttyReportFile(for: entry), bounds: bounds)
+    if let saved = entry.bounds, isOnScreen(saved) {
+        let bounds = Placement.stagger(saved)
+        // A shifted frame that would leave the screen is not applied; Terminal cascades that window itself.
+        if isOnScreen(bounds) {
+            Placement.place(reportFile: ttyReportFile(for: entry), bounds: bounds)
+        }
     }
     return true
 }

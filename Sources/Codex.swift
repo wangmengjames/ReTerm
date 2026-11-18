@@ -62,16 +62,57 @@ enum Codex {
     private static var cache: [Int32: (id: String?, checked: Date)] = [:]
     private static let lock = NSLock()
 
-    /// The session a running codex process is most likely showing, or nil if it cannot be told.
+    /// The id in `codex resume <id>`, if the process was started that way.
+    static func resumedId(of pid: Int32) -> String? {
+        resumedId(inArguments: run("/bin/ps", ["-ww", "-o", "args=", "-p", String(pid)]))
+    }
+
+    static func resumedId(inArguments args: String) -> String? {
+        let words = args.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let i = words.firstIndex(of: "resume") else { return nil }
+        // A session id is a UUID; a word like a prompt or a flag value must not be mistaken for one.
+        return words[(i + 1)...].first { UUID(uuidString: $0) != nil }
+    }
+
+    /// The session a running codex process is most likely showing, or nil if it cannot be told:
+    /// the newest session written in its folder since it started, else the one it was started to resume.
     static func sessionId(pid: Int32, cwd: String) -> String? {
         lock.lock()
         defer { lock.unlock() }
-        if let hit = cache[pid], Date().timeIntervalSince(hit.checked) < 30 { return hit.id }
+        // "Not found" is rechecked soon: a new session is only written once its first message is sent.
+        if let hit = cache[pid], Date().timeIntervalSince(hit.checked) < (hit.id == nil ? 2 : 30) { return hit.id }
         let started = startTime(of: pid) ?? Date()
         let id = sessions(modifiedSince: started.addingTimeInterval(-5)).first { $0.cwd == cwd }?.id
+            ?? resumedId(of: pid)
         cache[pid] = (id, Date())
         if cache.count > 200 { cache = cache.filter { Date().timeIntervalSince($0.value.checked) < 300 } }
         return id
+    }
+
+    /// Sessions for several codex processes at once. An id that more than one process would claim
+    /// (two tabs in one folder) is kept only by a process started to resume exactly it; the others
+    /// get none and reopen with Codex's own picker instead of the wrong conversation.
+    static func sessionIds(for procs: [(pid: Int32, cwd: String)]) -> [Int32: String] {
+        var ids: [Int32: String] = [:]
+        for p in procs { ids[p.pid] = sessionId(pid: p.pid, cwd: p.cwd) }
+        return settle(ids) { resumedId(of: $0) }
+    }
+
+    static func settle(_ ids: [Int32: String], resumed: (Int32) -> String?) -> [Int32: String] {
+        var result = ids
+        let shared = Dictionary(grouping: ids.keys, by: { ids[$0]! }).filter { $0.value.count > 1 }
+        for (id, pids) in shared {
+            let owners = pids.filter { resumed($0) == id }
+            for pid in pids where !(owners.count == 1 && owners[0] == pid) {
+                // A process started to resume a different session, which no other tab has, keeps that one.
+                if let own = resumed(pid), own != id, !ids.values.contains(own) {
+                    result[pid] = own
+                } else {
+                    result[pid] = nil
+                }
+            }
+        }
+        return result
     }
 
     /// The name Codex gave the session, from its index.

@@ -135,6 +135,20 @@ if args.contains("--self-test") {
     check(Pins.load().first?.id != a.id, "a pin is its own copy")
     check(Pins.toggle(a) && !Pins.contains(a) && Pins.load().count == 1, "unpin")
     check(a.pinKey == "claude:aaa-1" && c.pinKey == "shell:/tmp/c", "pin keys")
+    let f = [100, 100, 700, 500]
+    let t0 = Date()
+    check(Placement.stagger(f, now: t0) == f, "first window keeps its saved frame")
+    check(Placement.stagger(f, now: t0) == [124, 124, 724, 524], "a second window with the same frame is shifted")
+    check(Placement.stagger(f, now: t0) == [148, 148, 748, 548], "and a third further")
+    check(Placement.stagger(f, now: t0.addingTimeInterval(60)) == f, "later, the saved frame is used again")
+    let u1 = "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee", u2 = "0199aaaa-bbbb-7ccc-8ddd-ffffffffffff"
+    check(Codex.resumedId(inArguments: "node /x/codex.js resume \(u1)") == u1, "codex resume <id> is read from the command line")
+    check(Codex.resumedId(inArguments: "/x/bin/codex resume --last") == nil && Codex.resumedId(inArguments: "/x/bin/codex") == nil,
+          "no id without one on the command line")
+    check(Codex.settle([1: u1, 2: u1]) { _ in nil } == [:], "two tabs never share a session: neither keeps it when unsure")
+    check(Codex.settle([1: u1, 2: u1]) { $0 == 2 ? u1 : nil } == [2: u1], "the tab started to resume it keeps it")
+    check(Codex.settle([1: u1, 2: u1]) { $0 == 1 ? u2 : nil } == [1: u2], "a tab resumed into another session keeps its own")
+    check(Codex.settle([1: u1, 2: u2]) { _ in nil } == [1: u1, 2: u2], "distinct sessions are left alone")
     // An old history file without the newer fields must still load.
     let old = #"[{"id":"7F2C1D7E-0000-4000-8000-000000000001","date":"2026-11-18T10:00:00Z","closed":true,"entries":[{"id":"7F2C1D7E-0000-4000-8000-000000000002","kind":"claude","cwd":"/tmp/x","tty":"ttys009","sessionId":"old-1","reopened":false}]}]"#
     try? old.write(to: Paths.history, atomically: true, encoding: .utf8)
@@ -215,4 +229,22 @@ let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
+
+// Never drawn (the app has no menu bar of its own), but it is what makes ⌘V, ⌘A, ⌘W and the
+// rest work in the Search & Manage window.
+let mainMenu = NSMenu()
+let editItem = NSMenuItem()
+mainMenu.addItem(editItem)
+let edit = NSMenu(title: "Edit")
+editItem.submenu = edit
+edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+edit.addItem(.separator())
+edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+edit.addItem(withTitle: "Select All", action: #selector(NSResponder.selectAll(_:)), keyEquivalent: "a")
+edit.addItem(.separator())
+edit.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+app.mainMenu = mainMenu
 app.run()

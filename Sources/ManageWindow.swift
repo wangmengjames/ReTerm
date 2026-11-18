@@ -32,6 +32,21 @@ final class ManageWindowController: NSObject, NSTableViewDataSource, NSTableView
         window?.makeFirstResponder(search)
     }
 
+    /// Hide Session Titles was switched.
+    func settingsChanged() {
+        guard window != nil else { return }
+        reload()
+    }
+
+    private var hideTitles: Bool { UserDefaults.standard.bool(forKey: PanelModel.hideTitlesKey) }
+
+    /// The title, or the folder's name while titles are hidden (as the panel does).
+    private func shownTitle(_ entry: Entry) -> String {
+        guard hideTitles else { return entry.title }
+        let folder = (entry.cwd as NSString).lastPathComponent
+        return folder.isEmpty ? entry.cwd : folder
+    }
+
     func languageChanged() {
         guard window != nil else { return }
         applyLanguage()
@@ -72,7 +87,7 @@ final class ManageWindowController: NSObject, NSTableViewDataSource, NSTableView
         table.allowsMultipleSelection = true
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.target = self
-        table.doubleAction = #selector(reopenSelected)
+        table.doubleAction = #selector(reopenClicked)
         scroll.documentView = table
         content.addSubview(scroll)
 
@@ -123,7 +138,7 @@ final class ManageWindowController: NSObject, NSTableViewDataSource, NSTableView
     private func applyFilter() {
         let query = search.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
         rows = query.isEmpty ? all : all.filter {
-            $0.entry.title.lowercased().contains(query) || $0.entry.cwd.lowercased().contains(query)
+            shownTitle($0.entry).lowercased().contains(query) || $0.entry.cwd.lowercased().contains(query)
         }
         table.reloadData()
         updateButtons()
@@ -159,7 +174,7 @@ final class ManageWindowController: NSObject, NSTableViewDataSource, NSTableView
         }
         let text: String
         switch column {
-        case "title": text = item.entry.title
+        case "title": text = shownTitle(item.entry)
         case "folder": text = item.entry.shortPath
         default:
             if item.pinned {
@@ -187,9 +202,16 @@ final class ManageWindowController: NSObject, NSTableViewDataSource, NSTableView
 
     // MARK: Actions
 
-    @objc private func reopenSelected() {
-        var picked = selection
-        if picked.isEmpty, table.clickedRow >= 0, table.clickedRow < rows.count { picked = [rows[table.clickedRow]] }
+    @objc private func reopenClicked() {
+        // The double-click action also fires on a column header, where there is no clicked row.
+        let index = table.clickedRow
+        guard index >= 0, index < rows.count else { return }
+        reopenRows([rows[index]])
+    }
+
+    @objc private func reopenSelected() { reopenRows(selection) }
+
+    private func reopenRows(_ picked: [Row]) {
         for (index, row) in picked.enumerated() {
             DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 0.4) {
                 if reopen(row.entry), !row.pinned { History.markReopened(entry: row.entry.id) }

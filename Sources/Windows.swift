@@ -68,9 +68,9 @@ func setWindowBounds(tty: String, bounds: [Int]) {
         tell application "Terminal"
             repeat with w in windows
                 try
-                    repeat with t in tabs of w
-                        if (tty of t) is "/dev/\(tty)" then set bounds of w to {\(bounds.map(String.init).joined(separator: ", "))}
-                    end repeat
+                    if (count of tabs of w) is 1 and (tty of tab 1 of w) is "/dev/\(tty)" then
+                        set bounds of w to {\(bounds.map(String.init).joined(separator: ", "))}
+                    end if
                 end try
             end repeat
         end tell
@@ -93,7 +93,20 @@ func isOnScreen(_ bounds: [Int]) -> Bool {
 }
 
 /// Moves a reopened window to its old frame once the new tab has reported which tty it got.
+/// A tab that joined an existing window (Terminal set to open in tabs) is left where it is.
 enum Placement {
+    private static var recent: [(frame: [Int], at: Date)] = []
+
+    /// Tabs saved from one window share a frame; shift each repeat so reopened windows do not coincide.
+    /// Main thread only.
+    static func stagger(_ bounds: [Int], now: Date = Date()) -> [Int] {
+        recent.removeAll { now.timeIntervalSince($0.at) > 15 }
+        var frame = bounds
+        while recent.contains(where: { $0.frame == frame }) { frame = frame.map { $0 + 24 } }
+        recent.append((frame, now))
+        return frame
+    }
+
     static func place(reportFile: URL, bounds: [Int]) {
         var tries = 0
         let timer = Timer(timeInterval: 0.3, repeats: true) { timer in

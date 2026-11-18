@@ -109,6 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             let hide = !model.hideTitles
             UserDefaults.standard.set(hide, forKey: PanelModel.hideTitlesKey)
             model.hideTitles = hide
+            ManageWindowController.shared.settingsChanged()
         case .setLanguage(let language):
             Lang.setting = language
             model.language = language
