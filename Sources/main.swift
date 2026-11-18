@@ -17,6 +17,66 @@ if args.contains("--list") {
     exit(0)
 }
 
+if args.contains("--live") {
+    // Print every running Claude Code session, as the menu lists them. Read-only.
+    printJSON(scanLiveSessions())
+    exit(0)
+}
+
+if let i = args.firstIndex(of: "--render-panel"), args.count > i + 1 {
+    // --render-panel <out.png> [--dark] [--sample] [--zh|--en] : draw the panel to a picture (development aid).
+    if args.contains("--zh") { Lang.override = .chinese } else if args.contains("--en") { Lang.override = .english }
+    Task { @MainActor in
+        let ok = renderPanel(to: args[i + 1], dark: args.contains("--dark"), sample: args.contains("--sample"))
+        exit(ok ? 0 : 1)
+    }
+    RunLoop.main.run()
+}
+
+if let i = args.firstIndex(of: "--jump"), args.count > i + 1 {
+    // --jump <sessionId> : bring that running session's window to the front, as a menu click does.
+    guard let session = scanLiveSessions(includeTitles: false).first(where: { $0.sessionId == args[i + 1] }) else {
+        print("error: no running session with that id")
+        exit(1)
+    }
+    switch bringForward(session.jump) {
+    case .done:
+        // An editor jump finishes in the background and may post its fallback to the main queue.
+        RunLoop.main.run(until: Date().addingTimeInterval(3))
+        exit(0)
+    case .automationDenied(let app):
+        print("error: not allowed to control \(app) (System Settings › Privacy & Security › Automation)")
+        exit(1)
+    case .failed(let message):
+        print("error: \(message)")
+        exit(1)
+    }
+}
+
+if let i = args.firstIndex(of: "--finish"), args.count > i + 1 {
+    // --finish <sessionId> [--force] : save a Terminal session under Finished and close it, as ⌥-clicking its row does.
+    guard let session = scanLiveSessions(includeTitles: false).first(where: { $0.sessionId == args[i + 1] }),
+          session.hostKind == .terminal, case .terminal(_, let ttyPath) = session.jump else {
+        print("error: no running Terminal session with that id")
+        exit(1)
+    }
+    _ = ttyPath
+    do {
+        let result = try finishTerminalSession(sessionId: session.sessionId, allowUnfinished: args.contains("--force"))
+        Thread.sleep(forTimeInterval: 1.5)
+        completeFinish(result)
+        print("finished \(result.entry.kind) session in \(result.entry.cwd); "
+              + (result.sharedTabTTY.map { "ended it in shared tab \($0)" } ?? "closed windows \(result.windowIds)"))
+        exit(0)
+    } catch FinishError.notFinished(let status) {
+        print("error: the session is \(status); add --force to finish it anyway")
+        exit(1)
+    } catch {
+        print("error: \(error)")
+        exit(1)
+    }
+}
+
 if args.contains("--history") {
     printJSON(History.loadFillingTopics())
     exit(0)

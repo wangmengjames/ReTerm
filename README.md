@@ -10,9 +10,11 @@
 
 English | [简体中文](README.zh-CN.md)
 
-ReTerm is a tiny macOS menu bar app. One click closes every Terminal window and remembers them. Later, pick any one from the menu and it comes back in the right folder, with its [Claude Code](https://claude.com/claude-code) session resumed.
+ReTerm is a tiny macOS menu bar app. One click closes every Terminal window and remembers them. Later, pick any one from ReTerm's panel and it comes back in the right folder, with its [Claude Code](https://claude.com/claude-code) session resumed.
 
-<p align="center"><img src="docs/menu.svg" width="560" alt="Illustration of the ReTerm menu listing closed Terminal windows by session title and folder"></p>
+While sessions are running, the same panel lists every one of them, wherever it is (Terminal, iTerm2, VS Code, the Claude app), and the menu bar icon shows how many are waiting for you.
+
+<p align="center"><img src="docs/panel.png" width="400" alt="The ReTerm panel: running Claude Code sessions with their status and a Done button, then sessions finished today with an Open button"></p>
 
 ## Why
 
@@ -20,6 +22,11 @@ If you run several Claude Code sessions at once, you end up with a wall of Termi
 
 ## Features
 
+- **Live sessions**: every running Claude Code session with what it is doing (*Permission request*, *Your turn*, *Working*), where it runs and for how long. Click one to bring its window to the front: the exact Terminal or iTerm2 tab, the VS Code window holding its folder, or the session in the Claude app.
+- **Mark one finished**: click **Done** on a Terminal session. It is saved under **Finished today** and its window closes; reopen it from there whenever you like, with the conversation resumed. A session that is still working asks first.
+- **A count of sessions that need you**: the number next to the menu bar icon is how many sessions are stopped on a permission prompt or a question.
+- **Hide Session Titles** (in ⚙︎ settings): shows folder names instead of session titles, for screen sharing.
+- **English or Chinese**: follows the system language, or pick one in ⚙︎ settings.
 - **Save & Close All Terminal Windows**: records every open Terminal tab, then closes them. Warns you first if a Claude session is still working.
 - **Entries you can recognise**: each one shows the session's title (the same one Claude Code puts in the window title bar) and its folder.
 - **Reopen one or all**: Claude Code sessions are resumed with `claude --resume`; plain shells reopen in their folder. Reopened entries get a tick.
@@ -58,6 +65,7 @@ The first time you use **Save & Close**, macOS asks whether ReTerm may control T
 
 ## How it works
 
+- Running sessions are read from `~/.claude/sessions/<pid>.json` (only the session's id, folder, name, status and where it was started from; ReTerm never reads the tokens stored beside them). A file counts only while its process is still the one that wrote it, checked by process start time. The window a session lives in is found by walking up its parent processes to the app.
 - Open tabs are found from the process table: every `login` process started by Terminal.app is one tab.
 - If a Claude Code process is running in a tab, its folder and session id are read from `~/.claude/sessions/<pid>.json`, and its title from the session transcript. Otherwise the folder of the innermost process in the tab is used.
 - Closing sends `SIGHUP` to the processes in each tab (the same signal Terminal sends when you close a window), then asks Terminal to close the now-idle windows.
@@ -69,7 +77,7 @@ History is stored locally in `~/Library/Application Support/ReTerm/history.json`
 
 ## Limits
 
-- Terminal.app only (not iTerm2, Ghostty or the VS Code terminal).
+- Save & Close and Reopen work with Terminal.app only (not iTerm2, Ghostty or the VS Code terminal). The live session list covers Terminal, iTerm2, VS Code and its relatives (Cursor, Windsurf, VSCodium) and the Claude app; a session inside tmux is listed but cannot be jumped to. Marking a session finished works for Terminal sessions; if its tab shares a window with other tabs, the session ends but the tab stays open.
 - Scrollback and running commands are not restored. A plain shell comes back as a new shell in the same folder.
 - The format of `~/.claude/sessions` and of session transcripts is not a documented interface and may change between Claude Code versions.
 - After an update, macOS may ask again for permission to control Terminal, because the app is not signed with a developer certificate.
@@ -77,6 +85,9 @@ History is stored locally in `~/Library/Application Support/ReTerm/history.json`
 ## Command line
 
 ```sh
+~/Applications/ReTerm.app/Contents/MacOS/ReTerm --live          # running Claude Code sessions, as the panel lists them
+~/Applications/ReTerm.app/Contents/MacOS/ReTerm --jump <id>     # bring that session's window to the front
+~/Applications/ReTerm.app/Contents/MacOS/ReTerm --finish <id>   # save that Terminal session under Finished and close it
 ~/Applications/ReTerm.app/Contents/MacOS/ReTerm --list          # tabs that would be saved now
 ~/Applications/ReTerm.app/Contents/MacOS/ReTerm --history       # saved snapshots
 ~/Applications/ReTerm.app/Contents/MacOS/ReTerm --check-update  # current and latest version
@@ -84,7 +95,7 @@ History is stored locally in `~/Library/Application Support/ReTerm/history.json`
 
 ## Uninstall
 
-Quit ReTerm from its menu, then delete `~/Applications/ReTerm.app` and `~/Library/Application Support/ReTerm`.
+Quit ReTerm from its panel, then delete `~/Applications/ReTerm.app` and `~/Library/Application Support/ReTerm`.
 
 ## License
 
