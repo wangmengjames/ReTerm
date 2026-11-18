@@ -13,6 +13,10 @@ mkdir -p "$APP/Contents/MacOS"
 cp Info.plist "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# Assets.car is the same icon in asset-catalog form (the macOS Apps view needs it).
+# Regenerate with: xcrun actool Resources/Assets.xcassets --compile Resources --platform macosx \
+#   --minimum-deployment-target 13.0 --app-icon AppIcon --output-partial-info-plist /dev/null
+cp Resources/Assets.car "$APP/Contents/Resources/Assets.car"
 for arch in arm64 x86_64; do
     swiftc -swift-version 5 -O -target "$arch-apple-macos13.0" -o "build/ReTerm-$arch" Sources/*.swift
 done
