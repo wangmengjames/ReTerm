@@ -17,6 +17,32 @@ if args.contains("--list") {
     exit(0)
 }
 
+if args.contains("--live") {
+    // Print every running Claude Code session, as the menu lists them. Read-only.
+    printJSON(scanLiveSessions())
+    exit(0)
+}
+
+if let i = args.firstIndex(of: "--jump"), args.count > i + 1 {
+    // --jump <sessionId> : bring that running session's window to the front, as a menu click does.
+    guard let session = scanLiveSessions(includeTitles: false).first(where: { $0.sessionId == args[i + 1] }) else {
+        print("error: no running session with that id")
+        exit(1)
+    }
+    switch bringForward(session.jump) {
+    case .done:
+        // An editor jump finishes in the background.
+        Thread.sleep(forTimeInterval: 2)
+        exit(0)
+    case .automationDenied(let app):
+        print("error: not allowed to control \(app) (System Settings › Privacy & Security › Automation)")
+        exit(1)
+    case .failed(let message):
+        print("error: \(message)")
+        exit(1)
+    }
+}
+
 if args.contains("--history") {
     printJSON(History.loadFillingTopics())
     exit(0)

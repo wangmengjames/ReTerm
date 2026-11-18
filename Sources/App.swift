@@ -7,15 +7,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let relative = RelativeDateTimeFormatter()
     private var availableUpdate: Updater.Release?
     private var updateTimer: Timer?
+    private var badgeTimer: Timer?
+    /// The live sessions the open menu shows, by session id, for the click handler.
+    private var shownLive: [String: LiveSession] = [:]
+    private static let hideTitlesKey = "hideSessionTitles"
+    private var hideTitles: Bool { UserDefaults.standard.bool(forKey: Self.hideTitlesKey) }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = NSImage(systemSymbolName: "arrow.uturn.backward.square",
                                            accessibilityDescription: "ReTerm")
+        statusItem.button?.imagePosition = .imageLeft
         menu.delegate = self
         menu.autoenablesItems = false
         statusItem.menu = menu
         cleanLaunchFolder()
+
+        // The count of Claude sessions that need you, next to the icon. Reading a few small files, so often is fine.
+        refreshBadge()
+        let badge = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.refreshBadge() }
+        RunLoop.main.add(badge, forMode: .common)
+        badgeTimer = badge
 
         // Quietly look for a new version at most once a day.
         checkQuietlyIfDue()
@@ -34,6 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(i)
             menu.addItem(.separator())
         }
+        addLiveSessions(to: menu)
+        menu.addItem(.separator())
+
         let open = detectTerminalTabs(includeTopics: false)
 
         let close = item("Save & Close All Terminal Windows (\(open.count))…", #selector(saveAndClose))
@@ -71,6 +86,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let login = item("Launch at Login", #selector(toggleLogin))
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
+        let hide = item("Hide Session Titles", #selector(toggleHideTitles))
+        hide.state = hideTitles ? .on : .off
+        hide.toolTip = "Show folder names instead of session titles, e.g. while sharing your screen."
+        menu.addItem(hide)
         let clear = item("Clear History", #selector(clearHistory))
         clear.isEnabled = !history.isEmpty
         menu.addItem(clear)
@@ -80,6 +99,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(version)
         menu.addItem(item("Check for Updates…", #selector(checkForUpdates)))
         menu.addItem(item("Quit ReTerm", #selector(quit)))
+    }
+
+    // MARK: Live sessions
+
+    private func refreshBadge() {
+        let waiting = waitingSessionCount()
+        guard let button = statusItem.button else { return }
+        let title = waiting > 0 ? "\(waiting)" : ""
+        if button.title != title { button.title = title }
+        button.toolTip = waiting == 0 ? "ReTerm"
+            : "ReTerm: \(waiting) Claude session\(waiting == 1 ? " needs" : "s need") you"
+    }
+
+    /// A title, or its folder's name while titles are hidden.
+    private func shown(_ title: String, cwd: String) -> String {
+        guard hideTitles else { return title }
+        let folder = (cwd as NSString).lastPathComponent
+        return folder.isEmpty ? cwd : folder
+    }
+
+    private func addLiveSessions(to menu: NSMenu) {
+        let live = scanLiveSessions(includeTitles: !hideTitles)
+        shownLive = Dictionary(live.map { ($0.sessionId, $0) }, uniquingKeysWith: { a, _ in a })
+        refreshBadge()
+        let head = NSMenuItem(title: live.isEmpty ? "No Claude Code sessions running" : "Claude Code Sessions (\(live.count))",
+                              action: nil, keyEquivalent: "")
+        head.isEnabled = false
+        menu.addItem(head)
+        let now = Date()
+        for session in live {
+            let place = [session.hostLabel, session.hostDetail].compactMap { $0 }.joined(separator: " ")
+            let details = [statusText(session), place] + [shortAge(session.statusSince, now: now)].compactMap { $0 }
+            let i = item("\(shown(session.title, cwd: session.cwd))  —  \(details.joined(separator: " · "))",
+                         #selector(jumpToSession(_:)))
+            i.image = statusImage(session.status)
+            i.representedObject = session.sessionId
+            if case .unavailable(let reason) = session.jump {
+                i.isEnabled = false
+                i.toolTip = reason
+            } else {
+                i.toolTip = "Bring this session's window to the front (\(session.cwd))"
+            }
+            menu.addItem(i)
+        }
+    }
+
+    private func statusImage(_ status: LiveStatus) -> NSImage? {
+        let (symbol, color): (String, NSColor) = {
+            switch status {
+            case .waiting: return ("exclamationmark.circle.fill", .systemOrange)
+            case .idle: return ("checkmark.circle.fill", .systemGreen)
+            case .busy: return ("circle.dotted", .systemBlue)
+            case .fresh: return ("circle", .secondaryLabelColor)
+            case .unknown: return ("questionmark.circle", .secondaryLabelColor)
+            }
+        }()
+        let config = NSImage.SymbolConfiguration(paletteColors: [color])
+        return NSImage(systemSymbolName: symbol, accessibilityDescription: status.rawValue)?.withSymbolConfiguration(config)
+    }
+
+    @objc private func jumpToSession(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String, let session = shownLive[id] else { return }
+        switch bringForward(session.jump) {
+        case .done:
+            break
+        case .automationDenied(let app):
+            NSApp.activate(ignoringOtherApps: true)
+            explainAutomation(app: app, consequence: "")
+        case .failed(let message):
+            NSApp.activate(ignoringOtherApps: true)
+            inform("Could not bring that session forward", message)
+        }
+    }
+
+    @objc private func toggleHideTitles() {
+        UserDefaults.standard.set(!hideTitles, forKey: Self.hideTitlesKey)
     }
 
     // MARK: Updates
@@ -174,12 +269,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(head)
         }
         for entry in snapshot.entries {
-            let i = item("\(entry.title)  —  \(entry.shortPath)", #selector(reopenEntry(_:)))
+            let i = item("\(shown(entry.title, cwd: entry.cwd))  —  \(entry.shortPath)", #selector(reopenEntry(_:)))
             i.image = NSImage(systemSymbolName: entry.kind == "claude" ? "sparkles" : "terminal",
                               accessibilityDescription: entry.kind)
             i.state = entry.reopened ? .on : .off
             i.toolTip = entry.kind == "claude"
-                ? "Resume Claude Code session \(entry.name ?? "") (\(entry.sessionId ?? "")) in \(entry.cwd)"
+                ? "Resume Claude Code session \(hideTitles ? "" : entry.name ?? "") (\(entry.sessionId ?? "")) in \(entry.cwd)"
                 : "Open a shell in \(entry.cwd)"
             i.representedObject = [snapshot.id.uuidString, entry.id.uuidString]
             menu.addItem(i)
@@ -214,7 +309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var info = "\(claude.count) Claude Code session\(claude.count == 1 ? "" : "s"), \(entries.count - claude.count) plain shell\(entries.count - claude.count == 1 ? "" : "s"). You can reopen each one from the ReTerm menu."
         if !busy.isEmpty {
             info += "\n\n\(busy.count) Claude session\(busy.count == 1 ? " is" : "s are") still working and will be interrupted:\n"
-                + busy.map { "• \($0.title)" }.joined(separator: "\n")
+                + busy.map { "• \(shown($0.title, cwd: $0.cwd))" }.joined(separator: "\n")
             alert.alertStyle = .warning
         }
         alert.informativeText = info
@@ -228,7 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             ids = try windowIds(coveredBy: entries.map(\.tty))
         } catch CloseError.automationDenied {
-            explainAutomation()
+            explainAutomation(app: "Terminal", consequence: "\n\nNothing was closed.")
             return
         } catch {
             let failed = NSAlert()
@@ -248,10 +343,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func explainAutomation() {
+    private func explainAutomation(app: String, consequence: String) {
         let alert = NSAlert()
-        alert.messageText = "ReTerm needs permission to control Terminal"
-        alert.informativeText = "Open System Settings › Privacy & Security › Automation and turn on Terminal under ReTerm, then try again.\n\nNothing was closed."
+        alert.messageText = "ReTerm needs permission to control \(app)"
+        alert.informativeText = "Open System Settings › Privacy & Security › Automation and turn on \(app) under ReTerm, then try again." + consequence
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn,

@@ -98,7 +98,8 @@ enum History {
         var changed = false
         for s in all.indices {
             for e in all[s].entries.indices where all[s].entries[e].kind == "claude" && all[s].entries[e].topic == nil {
-                all[s].entries[e].topic = all[s].entries[e].sessionId.flatMap(sessionTopic(sessionId:)) ?? ""
+                let entry = all[s].entries[e]
+                all[s].entries[e].topic = entry.sessionId.flatMap { sessionTopic(sessionId: $0, cwd: entry.cwd) } ?? ""
                 changed = true
             }
         }
@@ -174,9 +175,21 @@ func isValidSessionId(_ id: String) -> Bool {
     id.range(of: "^[A-Za-z0-9-]+$", options: .regularExpression) != nil
 }
 
-func transcriptURL(sessionId: String) -> URL? {
+/// The folder name Claude Code keeps a cwd's transcripts under: every character but A-Z, a-z, 0-9 becomes "-".
+func projectSlug(_ cwd: String) -> String {
+    String(decoding: cwd.utf16.map { c in
+        (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ? c : 45
+    }, as: UTF16.self)
+}
+
+func transcriptURL(sessionId: String, cwd: String? = nil) -> URL? {
     guard isValidSessionId(sessionId) else { return nil }
     let projects = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects", isDirectory: true)
+    if let cwd {
+        // Usually the transcript is under the cwd's own folder; long or unusual paths are found by the scan below.
+        let file = projects.appendingPathComponent(projectSlug(cwd), isDirectory: true).appendingPathComponent("\(sessionId).jsonl")
+        if FileManager.default.fileExists(atPath: file.path) { return file }
+    }
     let dirs = (try? FileManager.default.contentsOfDirectory(at: projects, includingPropertiesForKeys: nil)) ?? []
     for dir in dirs {
         let file = dir.appendingPathComponent("\(sessionId).jsonl")
@@ -226,16 +239,45 @@ func firstRecord(in data: Data, type: String, field: String) -> String? {
     return nil
 }
 
-/// The session's topic: Claude Code's generated title, or failing that the first thing the user typed.
-func sessionTopic(sessionId: String) -> String? {
-    guard let url = transcriptURL(sessionId: sessionId),
-          let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return nil }
-    if let title = lastRecord(in: data, type: "ai-title", field: "aiTitle") { return title }
-    if let prompt = firstRecord(in: data, type: "last-prompt", field: "lastPrompt") {
+struct TranscriptTitles {
+    var custom: String?       // set with /rename
+    var generated: String?    // Claude Code's own title
+    var firstPrompt: String?
+}
+
+/// Transcripts only grow, so a file of the same size and date has the same titles.
+private var titleCache: [String: (size: Int, date: Date, titles: TranscriptTitles)] = [:]
+private let titleCacheLock = NSLock()
+
+func transcriptTitles(_ url: URL) -> TranscriptTitles? {
+    let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+    let size = values?.fileSize ?? -1
+    let date = values?.contentModificationDate ?? .distantPast
+    titleCacheLock.lock()
+    let cached = titleCache[url.path]
+    titleCacheLock.unlock()
+    if let cached, cached.size == size, cached.date == date { return cached.titles }
+
+    guard let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return nil }
+    var titles = TranscriptTitles()
+    titles.custom = lastRecord(in: data, type: "custom-title", field: "customTitle")
+    titles.generated = lastRecord(in: data, type: "ai-title", field: "aiTitle")
+    if titles.custom == nil && titles.generated == nil,
+       let prompt = firstRecord(in: data, type: "last-prompt", field: "lastPrompt") {
         let oneLine = prompt.split(whereSeparator: \.isNewline).first.map(String.init) ?? prompt
-        return oneLine.count > 40 ? String(oneLine.prefix(40)) + "…" : oneLine
+        titles.firstPrompt = oneLine.count > 40 ? String(oneLine.prefix(40)) + "…" : oneLine
     }
-    return nil
+    titleCacheLock.lock()
+    titleCache[url.path] = (size, date, titles)
+    titleCacheLock.unlock()
+    return titles
+}
+
+/// The session's topic: its /rename, else a name the user gave it, else Claude Code's
+/// generated title, else the first thing the user typed.
+func sessionTopic(sessionId: String, cwd: String? = nil, userName: String? = nil) -> String? {
+    let titles = transcriptURL(sessionId: sessionId, cwd: cwd).flatMap(transcriptTitles)
+    return titles?.custom ?? userName ?? titles?.generated ?? titles?.firstPrompt
 }
 
 func liveClaudeSessions() -> [Int32: ClaudeSession] {
@@ -271,8 +313,8 @@ func detectTerminalTabs(includeTopics: Bool = true) -> [Entry] {
         if let hit = descendants.first(where: { sessions[$0.pid] != nil && ($0.comm as NSString).lastPathComponent == "claude" }),
            let s = sessions[hit.pid] {
             // A name the user chose themselves wins over the generated topic.
-            let userNamed = (s.nameSource ?? "derived") != "derived" && !(s.name ?? "").isEmpty
-            let topic = userNamed ? s.name : (includeTopics ? (sessionTopic(sessionId: s.sessionId) ?? "") : nil)
+            let userName = (s.nameSource ?? "derived") != "derived" && !(s.name ?? "").isEmpty ? s.name : nil
+            let topic = includeTopics ? (sessionTopic(sessionId: s.sessionId, cwd: s.cwd, userName: userName) ?? "") : userName
             entries.append(Entry(kind: "claude", cwd: s.cwd, tty: login.tty,
                                  sessionId: s.sessionId, name: s.name, status: s.status, topic: topic))
         } else if let outer = descendants.first {
