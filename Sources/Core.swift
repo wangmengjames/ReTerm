@@ -12,9 +12,12 @@ struct Entry: Codable {
     var name: String?
     var status: String?
     var reopened = false
+    /// What the session is about (Claude Code's own window title). nil = not looked up yet, "" = none found.
+    var topic: String?
 
     var title: String {
         let folder = (cwd as NSString).lastPathComponent
+        if let topic, !topic.isEmpty { return topic }
         if let name, !name.isEmpty { return name }
         return folder.isEmpty ? cwd : folder
     }
@@ -57,21 +60,50 @@ enum History {
         guard let data = try? Data(contentsOf: Paths.history) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode([Snapshot].self, from: data)) ?? []
+        do {
+            return try decoder.decode([Snapshot].self, from: data)
+        } catch {
+            // Unreadable history: set it aside so the next save cannot overwrite it.
+            let aside = Paths.support.appendingPathComponent("history.unreadable-\(Int(Date().timeIntervalSince1970)).json")
+            try? FileManager.default.moveItem(at: Paths.history, to: aside)
+            return []
+        }
     }
 
-    static func save(_ snapshots: [Snapshot]) {
+    /// Returns false if the history could not be written.
+    @discardableResult
+    static func save(_ snapshots: [Snapshot]) -> Bool {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(Array(snapshots.prefix(limit))) else { return }
-        try? data.write(to: Paths.history, options: .atomic)
+        guard let data = try? encoder.encode(Array(snapshots.prefix(limit))) else { return false }
+        do {
+            try data.write(to: Paths.history, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
     }
 
-    static func add(_ snapshot: Snapshot) {
+    @discardableResult
+    static func add(_ snapshot: Snapshot) -> Bool {
         var all = load()
         all.insert(snapshot, at: 0)
-        save(all)
+        return save(all)
+    }
+
+    /// Fills in missing session topics (for snapshots saved before topics existed) and stores them.
+    static func loadFillingTopics() -> [Snapshot] {
+        var all = load()
+        var changed = false
+        for s in all.indices {
+            for e in all[s].entries.indices where all[s].entries[e].kind == "claude" && all[s].entries[e].topic == nil {
+                all[s].entries[e].topic = all[s].entries[e].sessionId.flatMap(sessionTopic(sessionId:)) ?? ""
+                changed = true
+            }
+        }
+        if changed { save(all) }
+        return all
     }
 
     static func markReopened(snapshot: UUID, entry: UUID) {
@@ -110,16 +142,18 @@ func processTable() -> [Proc] {
     run("/bin/ps", ["-axo", "pid=,ppid=,tty=,comm="]).split(separator: "\n").compactMap { line in
         let parts = line.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
         guard parts.count == 4, let pid = Int32(parts[0]), let ppid = Int32(parts[1]) else { return nil }
-        return Proc(pid: pid, ppid: ppid, tty: String(parts[2]), comm: String(parts[3]))
+        return Proc(pid: pid, ppid: ppid, tty: String(parts[2]), comm: parts[3].trimmingCharacters(in: .whitespaces))
     }
 }
 
 func workingDirectory(of pid: Int32) -> String? {
-    for line in run("/usr/sbin/lsof", ["-a", "-d", "cwd", "-p", String(pid), "-Fn"]).split(separator: "\n")
-    where line.hasPrefix("n") {
-        return String(line.dropFirst())
+    var info = proc_vnodepathinfo()
+    let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+    guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+    let path = withUnsafePointer(to: &info.pvi_cdir.vip_path) {
+        $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
     }
-    return nil
+    return path.isEmpty ? nil : path
 }
 
 // MARK: - Detection
@@ -129,8 +163,79 @@ struct ClaudeSession: Decodable {
     let sessionId: String
     let cwd: String
     let name: String?
+    let nameSource: String?
     let status: String?
     let kind: String?
+}
+
+// MARK: - Session topic
+
+func isValidSessionId(_ id: String) -> Bool {
+    id.range(of: "^[A-Za-z0-9-]+$", options: .regularExpression) != nil
+}
+
+func transcriptURL(sessionId: String) -> URL? {
+    guard isValidSessionId(sessionId) else { return nil }
+    let projects = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects", isDirectory: true)
+    let dirs = (try? FileManager.default.contentsOfDirectory(at: projects, includingPropertiesForKeys: nil)) ?? []
+    for dir in dirs {
+        let file = dir.appendingPathComponent("\(sessionId).jsonl")
+        if FileManager.default.fileExists(atPath: file.path) { return file }
+    }
+    return nil
+}
+
+/// Finds the last transcript line of the given record type and returns one of its string fields.
+func lastRecord(in data: Data, type: String, field: String) -> String? {
+    guard let marker = "\"type\":\"\(type)\"".data(using: .utf8) else { return nil }
+    let newline = UInt8(ascii: "\n")
+    var end = data.endIndex
+    while let hit = data.range(of: marker, options: .backwards, in: data.startIndex..<end) {
+        let lineStart = data[data.startIndex..<hit.lowerBound].lastIndex(of: newline).map { $0 + 1 } ?? data.startIndex
+        let lineEnd = data[hit.upperBound..<data.endIndex].firstIndex(of: newline) ?? data.endIndex
+        // The marker also appears inside quoted message text; only accept a line that really is this record.
+        if lineEnd - lineStart < 1_000_000,
+           let object = try? JSONSerialization.jsonObject(with: data[lineStart..<lineEnd]) as? [String: Any],
+           object["type"] as? String == type,
+           let value = object[field] as? String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        end = hit.lowerBound
+    }
+    return nil
+}
+
+/// Finds the first transcript line of the given record type that has a non-empty string field.
+func firstRecord(in data: Data, type: String, field: String) -> String? {
+    guard let marker = "\"type\":\"\(type)\"".data(using: .utf8) else { return nil }
+    let newline = UInt8(ascii: "\n")
+    var start = data.startIndex
+    while start < data.endIndex, let hit = data.range(of: marker, in: start..<data.endIndex) {
+        let lineStart = data[data.startIndex..<hit.lowerBound].lastIndex(of: newline).map { $0 + 1 } ?? data.startIndex
+        let lineEnd = data[hit.upperBound..<data.endIndex].firstIndex(of: newline) ?? data.endIndex
+        if lineEnd - lineStart < 1_000_000,
+           let object = try? JSONSerialization.jsonObject(with: data[lineStart..<lineEnd]) as? [String: Any],
+           object["type"] as? String == type,
+           let value = object[field] as? String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        start = lineEnd
+    }
+    return nil
+}
+
+/// The session's topic: Claude Code's generated title, or failing that the first thing the user typed.
+func sessionTopic(sessionId: String) -> String? {
+    guard let url = transcriptURL(sessionId: sessionId),
+          let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return nil }
+    if let title = lastRecord(in: data, type: "ai-title", field: "aiTitle") { return title }
+    if let prompt = firstRecord(in: data, type: "last-prompt", field: "lastPrompt") {
+        let oneLine = prompt.split(whereSeparator: \.isNewline).first.map(String.init) ?? prompt
+        return oneLine.count > 40 ? String(oneLine.prefix(40)) + "…" : oneLine
+    }
+    return nil
 }
 
 func liveClaudeSessions() -> [Int32: ClaudeSession] {
@@ -145,7 +250,7 @@ func liveClaudeSessions() -> [Int32: ClaudeSession] {
 }
 
 /// One entry per Terminal.app tab: a Claude Code session if one is running in it, otherwise the shell.
-func detectTerminalTabs() -> [Entry] {
+func detectTerminalTabs(includeTopics: Bool = true) -> [Entry] {
     let procs = processTable()
     let terminalPids = Set(procs.filter { $0.comm.hasSuffix("/Terminal.app/Contents/MacOS/Terminal") }.map(\.pid))
     let logins = procs.filter { terminalPids.contains($0.ppid) && $0.tty != "??" }
@@ -162,9 +267,14 @@ func detectTerminalTabs() -> [Entry] {
             descendants.append(next)
             queue.append(contentsOf: children[next.pid] ?? [])
         }
-        if let hit = descendants.first(where: { sessions[$0.pid] != nil }), let s = sessions[hit.pid] {
+        // The process must really be Claude: a leftover session file can name a pid that has since been reused.
+        if let hit = descendants.first(where: { sessions[$0.pid] != nil && ($0.comm as NSString).lastPathComponent == "claude" }),
+           let s = sessions[hit.pid] {
+            // A name the user chose themselves wins over the generated topic.
+            let userNamed = (s.nameSource ?? "derived") != "derived" && !(s.name ?? "").isEmpty
+            let topic = userNamed ? s.name : (includeTopics ? (sessionTopic(sessionId: s.sessionId) ?? "") : nil)
             entries.append(Entry(kind: "claude", cwd: s.cwd, tty: login.tty,
-                                 sessionId: s.sessionId, name: s.name, status: s.status))
+                                 sessionId: s.sessionId, name: s.name, status: s.status, topic: topic))
         } else if let outer = descendants.first {
             // The innermost process is where the user actually is (e.g. a shell started by a script).
             let inner = descendants.last ?? outer
@@ -187,7 +297,7 @@ func launchScript(for entry: Entry) -> String {
     lines.append("  echo \"ReTerm: folder no longer exists: \"\(shellQuote(entry.cwd))")
     lines.append("  exec \"${SHELL:-/bin/zsh}\" -l")
     lines.append("fi")
-    let validId = entry.sessionId.map { $0.range(of: "^[A-Za-z0-9-]+$", options: .regularExpression) != nil } ?? false
+    let validId = entry.sessionId.map(isValidSessionId) ?? false
     if entry.kind == "claude", let id = entry.sessionId, validId {
         // Interactive shell so the user's own aliases and PATH apply to `claude`.
         lines.append("exec \"${SHELL:-/bin/zsh}\" -lic 'claude --resume \(id); exec \"${SHELL:-/bin/zsh}\" -l'")

@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="480" viewBox="0 0 640 480" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15">
+  <title>Illustration of the ReTerm menu</title>
+  <rect width="640" height="480" fill="#1d2330"/>
+  <!-- menu bar -->
+  <rect width="640" height="30" fill="#141924"/>
+  <rect x="556" y="3" width="30" height="24" rx="5" fill="#3a6fd8"/>
+  <g transform="translate(562,6)" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="1" y="1" width="16" height="16" rx="4"/>
+    <path d="M5.5 8.5h5a2.2 2.2 0 0 1 0 4.4H8.6"/>
+    <path d="M7.6 6.2 5.3 8.5l2.3 2.3"/>
+  </g>
+  <text x="598" y="20" fill="#c9d1e0" font-size="13">9:41</text>
+  <!-- menu panel -->
+  <rect x="150" y="36" width="470" height="432" rx="10" fill="#2a3040" stroke="#454d61"/>
+  <g fill="#f2f4f8">
+    <text x="172" y="66">Save &amp; Close All Terminal Windows (4)…</text>
+    <text x="172" y="94">Save Snapshot Only</text>
+  </g>
+  <line x1="162" y1="108" x2="608" y2="108" stroke="#454d61"/>
+  <text x="172" y="134" fill="#8892a6">Closed 15 minutes ago (4)</text>
+  <g fill="#f2f4f8">
+    <text x="196" y="162">Refactor auth middleware  —  ~/code/api</text>
+    <text x="196" y="190">Fix flaky checkout test  —  ~/code/shop</text>
+    <text x="196" y="218">Draft release notes  —  ~/code/app</text>
+    <text x="196" y="246">Downloads  —  ~/Downloads</text>
+    <text x="172" y="274">Reopen All Not Yet Reopened (3)</text>
+    <text x="172" y="302">Earlier</text>
+    <text x="592" y="302" fill="#8892a6">›</text>
+  </g>
+  <!-- row icons: sparkle = Claude Code session, prompt = plain shell, tick = already reopened -->
+  <g fill="#e8a25c">
+    <path d="M180 151l1.6 4.4 4.4 1.6-4.4 1.6-1.6 4.4-1.6-4.4-4.4-1.6 4.4-1.6z"/>
+    <path d="M180 179l1.6 4.4 4.4 1.6-4.4 1.6-1.6 4.4-1.6-4.4-4.4-1.6 4.4-1.6z"/>
+    <path d="M180 207l1.6 4.4 4.4 1.6-4.4 1.6-1.6 4.4-1.6-4.4-4.4-1.6 4.4-1.6z"/>
+  </g>
+  <g fill="none" stroke="#c9d1e0" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="173" y="234" width="15" height="12" rx="2.5"/>
+    <path d="M176.5 238l2.2 2-2.2 2M181 242.5h3.5"/>
+  </g>
+  <path d="M158 212.5l3 3 5.5-6.5" fill="none" stroke="#f2f4f8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="162" y1="316" x2="608" y2="316" stroke="#454d61"/>
+  <g fill="#f2f4f8">
+    <text x="172" y="342">Launch at Login</text>
+    <text x="172" y="370">Clear History</text>
+  </g>
+  <line x1="162" y1="384" x2="608" y2="384" stroke="#454d61"/>
+  <text x="172" y="408" fill="#8892a6">ReTerm 0.2.0</text>
+  <text x="172" y="434" fill="#f2f4f8">Check for Updates…</text>
+  <text x="172" y="458" fill="#f2f4f8">Quit ReTerm</text>
+</svg>

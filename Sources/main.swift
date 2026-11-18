@@ -18,7 +18,7 @@ if args.contains("--list") {
 }
 
 if args.contains("--history") {
-    printJSON(History.load())
+    printJSON(History.loadFillingTopics())
     exit(0)
 }
 
@@ -50,6 +50,28 @@ if let i = args.firstIndex(of: "--close-tty"), args.count > i + 1 {
         print("error: \(error)")
         exit(1)
     }
+}
+
+if args.contains("--check-update") || args.contains("--self-update") {
+    // --check-update : print the latest released version. --self-update : install it over this bundle.
+    Updater.fetchLatest { result in
+        switch result {
+        case .failure(let error):
+            print("error: \(error.localizedDescription)")
+            exit(1)
+        case .success(let release):
+            let newer = Updater.isNewer(release.version, than: Updater.currentVersion)
+            print("current \(Updater.currentVersion), latest \(release.version), newer: \(newer)")
+            guard newer, args.contains("--self-update") else { exit(0) }
+            Updater.install(release) { outcome in
+                switch outcome {
+                case .success(let bundle): print("installed \(release.version) at \(bundle.path)"); exit(0)
+                case .failure(let error): print("error: \(error.localizedDescription)"); exit(1)
+                }
+            }
+        }
+    }
+    RunLoop.main.run()
 }
 
 let app = NSApplication.shared
