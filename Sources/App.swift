@@ -1,26 +1,31 @@
 import AppKit
 import ServiceManagement
+import SwiftUI
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
-    private let menu = NSMenu()
-    private let relative = RelativeDateTimeFormatter()
-    private var availableUpdate: Updater.Release?
+    private let popover = NSPopover()
+    private let model = PanelModel()
     private var updateTimer: Timer?
     private var badgeTimer: Timer?
-    /// The live sessions the open menu shows, by session id, for the click handler.
-    private var shownLive: [String: LiveSession] = [:]
-    private static let hideTitlesKey = "hideSessionTitles"
-    private var hideTitles: Bool { UserDefaults.standard.bool(forKey: Self.hideTitlesKey) }
+    private var panelTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "arrow.uturn.backward.square",
-                                           accessibilityDescription: "ReTerm")
-        statusItem.button?.imagePosition = .imageLeft
-        menu.delegate = self
-        menu.autoenablesItems = false
-        statusItem.menu = menu
+        if let button = statusItem.button {
+            button.image = NSImage(systemSymbolName: "arrow.uturn.backward.square", accessibilityDescription: "ReTerm")
+            button.imagePosition = .imageLeft
+            button.target = self
+            button.action = #selector(togglePanel(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
+
+        model.handle = { [weak self] action in self?.handle(action) }
+        let host = NSHostingController(rootView: PanelView(model: model))
+        host.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = host
+        popover.behavior = .transient
+        popover.delegate = self
         cleanLaunchFolder()
 
         // The count of Claude sessions that need you, next to the icon. Reading a few small files, so often is fine.
@@ -36,72 +41,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // MARK: Menu
+    // MARK: Panel
 
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-        if let update = availableUpdate {
-            let i = item("Update to ReTerm \(update.version)…", #selector(installAvailableUpdate))
-            i.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: "Update")
-            menu.addItem(i)
-            menu.addItem(.separator())
+    @objc private func togglePanel(_ sender: Any?) {
+        if popover.isShown {
+            popover.performClose(sender)
+            return
         }
-        addLiveSessions(to: menu)
-        menu.addItem(.separator())
-
-        let open = detectTerminalTabs(includeTopics: false)
-
-        let close = item("Save & Close All Terminal Windows (\(open.count))…", #selector(saveAndClose))
-        close.isEnabled = !open.isEmpty
-        menu.addItem(close)
-        let save = item("Save Snapshot Only", #selector(saveOnly))
-        save.isEnabled = !open.isEmpty
-        menu.addItem(save)
-        menu.addItem(.separator())
-
-        let history = History.loadFillingTopics()
-        if let latest = history.first {
-            addSnapshot(latest, to: menu)
-            if history.count > 1 {
-                let earlier = NSMenuItem(title: "Earlier", action: nil, keyEquivalent: "")
-                let sub = NSMenu()
-                for snapshot in history.dropFirst() {
-                    let entry = NSMenuItem(title: heading(snapshot), action: nil, keyEquivalent: "")
-                    let inner = NSMenu()
-                    inner.autoenablesItems = false
-                    addSnapshot(snapshot, to: inner, withHeading: false)
-                    entry.submenu = inner
-                    sub.addItem(entry)
-                }
-                earlier.submenu = sub
-                menu.addItem(earlier)
-            }
-        } else {
-            let empty = NSMenuItem(title: "Nothing saved yet", action: nil, keyEquivalent: "")
-            empty.isEnabled = false
-            menu.addItem(empty)
-        }
-
-        menu.addItem(.separator())
-        let login = item("Launch at Login", #selector(toggleLogin))
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        menu.addItem(login)
-        let hide = item("Hide Session Titles", #selector(toggleHideTitles))
-        hide.state = hideTitles ? .on : .off
-        hide.toolTip = "Show folder names instead of session titles, e.g. while sharing your screen."
-        menu.addItem(hide)
-        let clear = item("Clear History", #selector(clearHistory))
-        clear.isEnabled = !history.isEmpty
-        menu.addItem(clear)
-        menu.addItem(.separator())
-        let version = NSMenuItem(title: "ReTerm \(Updater.currentVersion)", action: nil, keyEquivalent: "")
-        version.isEnabled = false
-        menu.addItem(version)
-        menu.addItem(item("Check for Updates…", #selector(checkForUpdates)))
-        menu.addItem(item("Quit ReTerm", #selector(quit)))
+        guard let button = statusItem.button else { return }
+        model.reload()
+        NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+        // Statuses change while the panel is open; keep them current.
+        panelTimer?.invalidate()
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.model.reload() }
+        RunLoop.main.add(timer, forMode: .common)
+        panelTimer = timer
     }
 
-    // MARK: Live sessions
+    func popoverDidClose(_ notification: Notification) {
+        panelTimer?.invalidate()
+        panelTimer = nil
+    }
+
+    private func closePanel() {
+        if popover.isShown { popover.performClose(nil) }
+    }
+
+    private func handle(_ action: PanelAction) {
+        switch action {
+        case .jump(let session):
+            closePanel()
+            jump(to: session)
+        case .finish(let session):
+            finish(session)
+        case .reopen(let snapshot, let entry):
+            reopenEntry(snapshot: snapshot, entry: entry)
+        case .reopenAll(let snapshot):
+            reopenAll(snapshot: snapshot)
+        case .saveAndClose:
+            closePanel()
+            saveAndClose()
+        case .saveOnly:
+            saveOnly()
+        case .installUpdate:
+            closePanel()
+            installAvailableUpdate()
+        case .checkForUpdates:
+            closePanel()
+            checkForUpdates()
+        case .toggleLaunchAtLogin:
+            toggleLogin()
+        case .toggleHideTitles:
+            let hide = !model.hideTitles
+            UserDefaults.standard.set(hide, forKey: PanelModel.hideTitlesKey)
+            model.hideTitles = hide
+        case .setLanguage(let language):
+            Lang.setting = language
+            model.language = language
+        case .clearHistory:
+            History.save([])
+        case .quit:
+            NSApp.terminate(nil)
+        }
+        model.reload()
+        refreshBadge()
+    }
 
     private func refreshBadge() {
         let waiting = waitingSessionCount()
@@ -109,155 +115,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let title = waiting > 0 ? "\(waiting)" : ""
         if button.title != title { button.title = title }
         button.toolTip = waiting == 0 ? "ReTerm"
-            : "ReTerm: \(waiting) Claude session\(waiting == 1 ? " needs" : "s need") you"
+            : L("ReTerm: \(waiting) Claude session\(waiting == 1 ? " needs" : "s need") you",
+                "ReTerm：\(waiting) 个 Claude 会话需要你处理")
     }
 
-    /// A title, or its folder's name while titles are hidden.
-    private func shown(_ title: String, cwd: String) -> String {
-        guard hideTitles else { return title }
-        let folder = (cwd as NSString).lastPathComponent
-        return folder.isEmpty ? cwd : folder
-    }
+    // MARK: Live sessions
 
-    private func addLiveSessions(to menu: NSMenu) {
-        let live = scanLiveSessions(includeTitles: !hideTitles)
-        shownLive = Dictionary(live.map { ($0.sessionId, $0) }, uniquingKeysWith: { a, _ in a })
-        refreshBadge()
-        let head = NSMenuItem(title: live.isEmpty ? "No Claude Code sessions running" : "Claude Code Sessions (\(live.count))",
-                              action: nil, keyEquivalent: "")
-        head.isEnabled = false
-        menu.addItem(head)
-        let now = Date()
-        for session in live {
-            let place = [session.hostLabel, session.hostDetail].compactMap { $0 }.joined(separator: " ")
-            let details = [statusText(session), place] + [shortAge(session.statusSince, now: now)].compactMap { $0 }
-            let i = item("\(shown(session.title, cwd: session.cwd))  —  \(details.joined(separator: " · "))",
-                         #selector(jumpToSession(_:)))
-            i.image = statusImage(session.status)
-            i.representedObject = session.sessionId
-            if case .unavailable(let reason) = session.jump {
-                i.isEnabled = false
-                i.toolTip = reason
-            } else {
-                i.toolTip = "Bring this session's window to the front (\(session.cwd))"
-            }
-            // Holding ⌥ turns the row into "finished": save it under Finished and close its window.
-            i.keyEquivalentModifierMask = []
-            menu.addItem(i)
-            menu.addItem(finishItem(for: session))
-        }
-        if !live.isEmpty { menu.addItem(finishMenu(for: live)) }
-    }
-
-    /// Only a Terminal session can be closed and later resumed with `claude --resume`.
-    private func isFinishable(_ session: LiveSession) -> Bool {
-        guard session.hostKind == .terminal, case .terminal(let app, _) = session.jump else { return false }
-        return app == "Terminal"
-    }
-
-    /// "Mark as Finished ▸": every Terminal session, one click each. Visible, no key to hold.
-    private func finishMenu(for live: [LiveSession]) -> NSMenuItem {
-        let parent = NSMenuItem(title: "Mark as Finished", action: nil, keyEquivalent: "")
-        parent.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: "Mark as Finished")
-        let sub = NSMenu()
-        sub.autoenablesItems = false
-        let finishable = live.filter(isFinishable)
-        for session in finishable {
-            let i = item("\(shown(session.title, cwd: session.cwd))  —  \(statusText(session))", #selector(finishSession(_:)))
-            i.image = statusImage(session.status)
-            i.representedObject = session.sessionId
-            i.toolTip = "Close this session's window and keep it under Finished, ready to reopen."
-            sub.addItem(i)
-        }
-        if finishable.isEmpty {
-            let none = NSMenuItem(title: "No Terminal sessions to finish", action: nil, keyEquivalent: "")
-            none.isEnabled = false
-            sub.addItem(none)
-        }
-        sub.addItem(.separator())
-        let note = NSMenuItem(title: "Saves it under Finished and closes its window", action: nil, keyEquivalent: "")
-        note.isEnabled = false
-        sub.addItem(note)
-        if finishable.count < live.count {
-            let other = NSMenuItem(title: "Sessions in other apps can’t be closed from here", action: nil, keyEquivalent: "")
-            other.isEnabled = false
-            sub.addItem(other)
-        }
-        parent.submenu = sub
-        return parent
-    }
-
-    private func finishItem(for session: LiveSession) -> NSMenuItem {
-        let name = shown(session.title, cwd: session.cwd)
-        let finish: NSMenuItem
-        if isFinishable(session) {
-            finish = item("Finished: Save & Close “\(name)”", #selector(finishSession(_:)))
-            finish.representedObject = session.sessionId
-            finish.toolTip = "Close this session's window and keep it under Finished, ready to reopen."
-        } else {
-            finish = NSMenuItem(title: "\(name)  —  only Terminal sessions can be finished here", action: nil, keyEquivalent: "")
-            finish.isEnabled = false
-        }
-        finish.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: "Finished")
-        finish.keyEquivalentModifierMask = .option
-        finish.isAlternate = true
-        return finish
-    }
-
-    @objc private func finishSession(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String, let session = shownLive[id],
-              case .terminal(_, let ttyPath) = session.jump else { return }
-        let tty = ttyPath.replacingOccurrences(of: "/dev/", with: "")
-        let name = shown(session.title, cwd: session.cwd)
-        // Only a session that has finished its turn closes without asking.
-        let current = scanLiveSessions(includeTitles: false).first(where: { $0.sessionId == id })
-        if let current, current.status != .idle && current.status != .fresh {
-            NSApp.activate(ignoringOtherApps: true)
-            let alert = NSAlert()
-            alert.messageText = "“\(name)” is not finished"
-            alert.informativeText = "It is \(statusText(current).lowercased()) and will be interrupted. It is kept under Finished, so you can reopen it later."
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "Finish Anyway")
-            alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
-        do {
-            let result = try finishTerminalSession(tty: tty, sessionId: id)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                closeWindows(ids: result.windowIds)
-            }
-        } catch FinishError.gone {
-            NSApp.activate(ignoringOtherApps: true)
-            inform("That session has already ended", "Nothing was saved or closed.")
-        } catch FinishError.automationDenied {
-            NSApp.activate(ignoringOtherApps: true)
-            explainAutomation(app: "Terminal", consequence: "\n\nNothing was closed.")
-        } catch FinishError.notSaved {
-            NSApp.activate(ignoringOtherApps: true)
-            inform("The session could not be saved", "Nothing was closed.")
-        } catch {
-            NSApp.activate(ignoringOtherApps: true)
-            inform("Could not talk to Terminal", "\(error)\n\nNothing was closed.")
-        }
-    }
-
-    private func statusImage(_ status: LiveStatus) -> NSImage? {
-        let (symbol, color): (String, NSColor) = {
-            switch status {
-            case .waiting: return ("exclamationmark.circle.fill", .systemOrange)
-            case .idle: return ("checkmark.circle.fill", .systemGreen)
-            case .busy: return ("circle.dotted", .systemBlue)
-            case .shell: return ("terminal", .systemTeal)
-            case .fresh: return ("circle", .secondaryLabelColor)
-            case .unknown: return ("questionmark.circle", .secondaryLabelColor)
-            }
-        }()
-        let config = NSImage.SymbolConfiguration(paletteColors: [color])
-        return NSImage(systemSymbolName: symbol, accessibilityDescription: status.rawValue)?.withSymbolConfiguration(config)
-    }
-
-    @objc private func jumpToSession(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String, let session = shownLive[id] else { return }
+    private func jump(to session: LiveSession) {
         switch bringForward(session.jump) {
         case .done:
             break
@@ -266,12 +130,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             explainAutomation(app: app, consequence: "")
         case .failed(let message):
             NSApp.activate(ignoringOtherApps: true)
-            inform("Could not bring that session forward", message)
+            inform(L("Could not bring that session forward", "没能跳到这个会话"), message)
         }
     }
 
-    @objc private func toggleHideTitles() {
-        UserDefaults.standard.set(!hideTitles, forKey: Self.hideTitlesKey)
+    private func finish(_ session: LiveSession, anyway: Bool = false) {
+        guard model.isFinishable(session) else { return }
+        let name = model.shown(session.title, cwd: session.cwd)
+        do {
+            // Only a session that has finished its turn closes without asking; the check uses the
+            // same reading of its status as the step that ends it.
+            let result = try finishTerminalSession(sessionId: session.sessionId, allowUnfinished: anyway)
+            // Show it moving to Finished straight away; the rescan confirms it once the window has closed.
+            model.live.removeAll { $0.sessionId == session.sessionId }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                completeFinish(result)
+                self?.model.reload()
+                self?.refreshBadge()
+            }
+        } catch FinishError.notFinished(let status) {
+            closePanel()
+            NSApp.activate(ignoringOtherApps: true)
+            let word = LiveStatus(rawValue: status).map { statusText(LiveSession(
+                pid: session.pid, sessionId: session.sessionId, title: session.title, cwd: session.cwd, status: $0,
+                waitingFor: session.waitingFor, statusSince: nil, hostKind: session.hostKind, hostLabel: session.hostLabel,
+                hostDetail: nil, jump: session.jump)) } ?? status
+            let alert = NSAlert()
+            alert.messageText = L("“\(name)” is not finished", "“\(name)”还没结束")
+            alert.informativeText = L(
+                "It is \(word.lowercased()) and will be interrupted. It is kept under Finished, so you can reopen it later.",
+                "它现在的状态是“\(word)”，会被中断。它会保存在“完成”里，之后可以重新打开。")
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: L("Finish Anyway", "仍然完成"))
+            alert.addButton(withTitle: L("Cancel", "取消"))
+            if alert.runModal() == .alertFirstButtonReturn { finish(session, anyway: true) }
+        } catch FinishError.gone {
+            closePanel()
+            NSApp.activate(ignoringOtherApps: true)
+            inform(L("That session has already ended", "这个会话已经结束了"), L("Nothing was saved or closed.", "没有保存或关闭任何东西。"))
+        } catch FinishError.automationDenied {
+            closePanel()
+            NSApp.activate(ignoringOtherApps: true)
+            explainAutomation(app: "Terminal", consequence: L("\n\nNothing was closed.", "\n\n没有关闭任何东西。"))
+        } catch FinishError.notSaved {
+            closePanel()
+            NSApp.activate(ignoringOtherApps: true)
+            inform(L("The session could not be saved", "没能保存这个会话"), L("Nothing was closed.", "没有关闭任何东西。"))
+        } catch {
+            closePanel()
+            NSApp.activate(ignoringOtherApps: true)
+            inform(L("Could not talk to Terminal", "没能和 Terminal 通信"), "\(error)" + L("\n\nNothing was closed.", "\n\n没有关闭任何东西。"))
+        }
     }
 
     // MARK: Updates
@@ -282,47 +191,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Updater.lastCheckKey)
         Updater.fetchLatest { [weak self] result in
             if case .success(let release) = result, Updater.isNewer(release.version, than: Updater.currentVersion) {
-                self?.availableUpdate = release
+                self?.model.update = release
             }
         }
     }
 
-    @objc private func checkForUpdates() {
+    private func checkForUpdates() {
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Updater.lastCheckKey)
         Updater.fetchLatest { [weak self] result in
             guard let self else { return }
             NSApp.activate(ignoringOtherApps: true)
             switch result {
             case .failure(let error):
-                self.inform("Could not check for updates", error.localizedDescription)
+                self.inform(L("Could not check for updates", "没能检查更新"), error.localizedDescription)
             case .success(let release):
                 if Updater.isNewer(release.version, than: Updater.currentVersion) {
-                    self.availableUpdate = release
+                    self.model.update = release
                     self.offer(release)
                 } else {
-                    self.availableUpdate = nil
-                    self.inform("ReTerm is up to date", "You have version \(Updater.currentVersion), the latest release.")
+                    self.model.update = nil
+                    self.inform(L("ReTerm is up to date", "ReTerm 已是最新版"),
+                                L("You have version \(Updater.currentVersion), the latest release.",
+                                  "你的版本 \(Updater.currentVersion) 就是最新发布的版本。"))
                 }
             }
         }
     }
 
-    @objc private func installAvailableUpdate() {
-        guard let release = availableUpdate else { return }
+    private func installAvailableUpdate() {
+        guard let release = model.update else { return }
         NSApp.activate(ignoringOtherApps: true)
         offer(release)
     }
 
     private func offer(_ release: Updater.Release) {
         let alert = NSAlert()
-        alert.messageText = "ReTerm \(release.version) is available"
+        alert.messageText = L("ReTerm \(release.version) is available", "ReTerm \(release.version) 可以更新了")
         let notes = (release.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        alert.informativeText = "You have \(Updater.currentVersion)."
+        alert.informativeText = L("You have \(Updater.currentVersion).", "你现在的版本是 \(Updater.currentVersion)。")
             + (notes.isEmpty ? "" : "\n\n" + String(notes.prefix(600)))
-            + "\n\nYour saved windows are kept. macOS may ask once more for permission to control Terminal after updating."
-        alert.addButton(withTitle: "Update and Relaunch")
-        alert.addButton(withTitle: "View on GitHub")
-        alert.addButton(withTitle: "Later")
+            + L("\n\nYour saved windows are kept. macOS may ask once more for permission to control Terminal after updating.",
+                "\n\n已保存的窗口会保留。更新后 macOS 可能会再问一次是否允许控制 Terminal。")
+        alert.addButton(withTitle: L("Update and Relaunch", "更新并重启"))
+        alert.addButton(withTitle: L("View on GitHub", "在 GitHub 上查看"))
+        alert.addButton(withTitle: L("Later", "以后再说"))
         switch alert.runModal() {
         case .alertFirstButtonReturn:
             Updater.install(release) { [weak self] result in
@@ -331,7 +243,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     Updater.relaunch(bundle)
                 case .failure(let error):
                     NSApp.activate(ignoringOtherApps: true)
-                    self?.inform("Update failed", error.localizedDescription + "\n\nYou can download it from the GitHub page instead.")
+                    self?.inform(L("Update failed", "更新失败"), error.localizedDescription
+                                 + L("\n\nYou can download it from the GitHub page instead.", "\n\n可以改从 GitHub 页面下载。"))
                 }
             }
         case .alertSecondButtonReturn:
@@ -348,75 +261,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.runModal()
     }
 
-    private func item(_ title: String, _ action: Selector) -> NSMenuItem {
-        let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        i.target = self
-        return i
-    }
+    // MARK: Save, close, reopen
 
-    private func heading(_ snapshot: Snapshot) -> String {
-        if snapshot.finished == true {
-            let day = Calendar.current.isDateInToday(snapshot.date) ? "today"
-                : DateFormatter.localizedString(from: snapshot.date, dateStyle: .medium, timeStyle: .none)
-            return "Finished \(day) (\(snapshot.entries.count))"
-        }
-        let when = relative.localizedString(for: snapshot.date, relativeTo: Date())
-        return "\(snapshot.closed ? "Closed" : "Saved") \(when) (\(snapshot.entries.count))"
-    }
-
-    private func addSnapshot(_ snapshot: Snapshot, to menu: NSMenu, withHeading: Bool = true) {
-        if withHeading {
-            let head = NSMenuItem(title: heading(snapshot), action: nil, keyEquivalent: "")
-            head.isEnabled = false
-            menu.addItem(head)
-        }
-        for entry in snapshot.entries {
-            let i = item("\(shown(entry.title, cwd: entry.cwd))  —  \(entry.shortPath)", #selector(reopenEntry(_:)))
-            i.image = NSImage(systemSymbolName: entry.kind == "claude" ? "sparkles" : "terminal",
-                              accessibilityDescription: entry.kind)
-            i.state = entry.reopened ? .on : .off
-            i.toolTip = entry.kind == "claude"
-                ? "Resume Claude Code session \(hideTitles ? "" : entry.name ?? "") (\(entry.sessionId ?? "")) in \(entry.cwd)"
-                : "Open a shell in \(entry.cwd)"
-            i.representedObject = [snapshot.id.uuidString, entry.id.uuidString]
-            menu.addItem(i)
-        }
-        let remaining = snapshot.entries.filter { !$0.reopened }.count
-        let all = item("Reopen All Not Yet Reopened (\(remaining))", #selector(reopenAll(_:)))
-        all.representedObject = snapshot.id.uuidString
-        all.isEnabled = remaining > 0
-        menu.addItem(all)
-    }
-
-    // MARK: Actions
-
-    @objc private func saveOnly() {
+    private func saveOnly() {
         let entries = detectTerminalTabs()
         guard !entries.isEmpty else { return }
         if !History.add(Snapshot(closed: false, entries: entries)) {
+            closePanel()
             NSApp.activate(ignoringOtherApps: true)
-            inform("The snapshot could not be saved", "Check that ~/Library/Application Support/ReTerm is writable.")
+            inform(L("The snapshot could not be saved", "没能保存快照"),
+                   L("Check that ~/Library/Application Support/ReTerm is writable.", "请检查 ~/Library/Application Support/ReTerm 是否可写。"))
         }
     }
 
-    @objc private func saveAndClose() {
+    private func saveAndClose() {
         let entries = detectTerminalTabs()
         guard !entries.isEmpty else { return }
         let claude = entries.filter { $0.kind == "claude" }
         let busy = claude.filter { ($0.status ?? "idle") != "idle" }
+        let shells = entries.count - claude.count
 
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Save and close \(entries.count) Terminal tab\(entries.count == 1 ? "" : "s")?"
-        var info = "\(claude.count) Claude Code session\(claude.count == 1 ? "" : "s"), \(entries.count - claude.count) plain shell\(entries.count - claude.count == 1 ? "" : "s"). You can reopen each one from the ReTerm menu."
+        alert.messageText = L("Save and close \(entries.count) Terminal tab\(entries.count == 1 ? "" : "s")?",
+                              "保存并关闭 \(entries.count) 个 Terminal 标签页？")
+        var info = L("\(claude.count) Claude Code session\(claude.count == 1 ? "" : "s"), \(shells) plain shell\(shells == 1 ? "" : "s"). You can reopen each one from ReTerm.",
+                     "\(claude.count) 个 Claude Code 会话，\(shells) 个普通 shell。每一个都能在 ReTerm 里重新打开。")
         if !busy.isEmpty {
-            info += "\n\n\(busy.count) Claude session\(busy.count == 1 ? " is" : "s are") still working and will be interrupted:\n"
-                + busy.map { "• \(shown($0.title, cwd: $0.cwd))" }.joined(separator: "\n")
+            info += L("\n\n\(busy.count) Claude session\(busy.count == 1 ? " is" : "s are") still working and will be interrupted:\n",
+                      "\n\n有 \(busy.count) 个 Claude 会话还在工作，会被中断：\n")
+                + busy.map { "• \(model.shown($0.title, cwd: $0.cwd))" }.joined(separator: "\n")
             alert.alertStyle = .warning
         }
         alert.informativeText = info
-        alert.addButton(withTitle: "Save & Close")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: L("Save & Close", "保存并关闭"))
+        alert.addButton(withTitle: L("Cancel", "取消"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         // Ask Terminal which windows to close before anything is terminated,
@@ -425,18 +304,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             ids = try windowIds(coveredBy: entries.map(\.tty))
         } catch CloseError.automationDenied {
-            explainAutomation(app: "Terminal", consequence: "\n\nNothing was closed.")
+            explainAutomation(app: "Terminal", consequence: L("\n\nNothing was closed.", "\n\n没有关闭任何东西。"))
             return
         } catch {
-            let failed = NSAlert()
-            failed.messageText = "Could not talk to Terminal"
-            failed.informativeText = "\(error)\n\nNothing was closed."
-            failed.runModal()
+            inform(L("Could not talk to Terminal", "没能和 Terminal 通信"), "\(error)" + L("\n\nNothing was closed.", "\n\n没有关闭任何东西。"))
             return
         }
 
         guard History.add(Snapshot(closed: true, entries: entries)) else {
-            inform("The snapshot could not be saved", "Nothing was closed.")
+            inform(L("The snapshot could not be saved", "没能保存快照"), L("Nothing was closed.", "没有关闭任何东西。"))
             return
         }
         hangUp(ttys: entries.map(\.tty))
@@ -447,35 +323,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func explainAutomation(app: String, consequence: String) {
         let alert = NSAlert()
-        alert.messageText = "ReTerm needs permission to control \(app)"
-        alert.informativeText = "Open System Settings › Privacy & Security › Automation and turn on \(app) under ReTerm, then try again." + consequence
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "Cancel")
+        alert.messageText = L("ReTerm needs permission to control \(app)", "ReTerm 需要控制 \(app) 的权限")
+        alert.informativeText = L("Open System Settings › Privacy & Security › Automation and turn on \(app) under ReTerm, then try again.",
+                                  "打开“系统设置 › 隐私与安全性 › 自动化”，在 ReTerm 下面打开 \(app)，然后再试一次。") + consequence
+        alert.addButton(withTitle: L("Open System Settings", "打开系统设置"))
+        alert.addButton(withTitle: L("Cancel", "取消"))
         if alert.runModal() == .alertFirstButtonReturn,
            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") {
             NSWorkspace.shared.open(url)
         }
     }
 
-    @objc private func reopenEntry(_ sender: NSMenuItem) {
-        guard let ids = sender.representedObject as? [String],
-              let sid = UUID(uuidString: ids[0]), let eid = UUID(uuidString: ids[1]),
-              let entry = History.load().first(where: { $0.id == sid })?.entries.first(where: { $0.id == eid })
-        else { return }
+    private func reopenEntry(snapshot sid: UUID, entry eid: UUID) {
+        guard let entry = History.load().first(where: { $0.id == sid })?.entries.first(where: { $0.id == eid }) else { return }
         if reopen(entry) { History.markReopened(snapshot: sid, entry: eid) }
     }
 
-    @objc private func reopenAll(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let sid = UUID(uuidString: raw),
-              let snapshot = History.load().first(where: { $0.id == sid }) else { return }
+    private func reopenAll(snapshot sid: UUID) {
+        guard let snapshot = History.load().first(where: { $0.id == sid }) else { return }
         for (index, entry) in snapshot.entries.filter({ !$0.reopened }).enumerated() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 0.4) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 0.4) { [weak self] in
                 if reopen(entry) { History.markReopened(snapshot: sid, entry: entry.id) }
+                self?.model.reload()
             }
         }
     }
 
-    @objc private func toggleLogin() {
+    private func toggleLogin() {
         do {
             if SMAppService.mainApp.status == .enabled {
                 try SMAppService.mainApp.unregister()
@@ -483,14 +357,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try SMAppService.mainApp.register()
             }
         } catch {
-            let alert = NSAlert()
-            alert.messageText = "Could not change Launch at Login"
-            alert.informativeText = error.localizedDescription
-            alert.runModal()
+            closePanel()
+            NSApp.activate(ignoringOtherApps: true)
+            inform(L("Could not change Launch at Login", "没能更改“登录时启动”"), error.localizedDescription)
         }
     }
-
-    @objc private func clearHistory() { History.save([]) }
-
-    @objc private func quit() { NSApp.terminate(nil) }
 }

@@ -23,6 +23,16 @@ if args.contains("--live") {
     exit(0)
 }
 
+if let i = args.firstIndex(of: "--render-panel"), args.count > i + 1 {
+    // --render-panel <out.png> [--dark] [--sample] [--zh|--en] : draw the panel to a picture (development aid).
+    if args.contains("--zh") { Lang.override = .chinese } else if args.contains("--en") { Lang.override = .english }
+    Task { @MainActor in
+        let ok = renderPanel(to: args[i + 1], dark: args.contains("--dark"), sample: args.contains("--sample"))
+        exit(ok ? 0 : 1)
+    }
+    RunLoop.main.run()
+}
+
 if let i = args.firstIndex(of: "--jump"), args.count > i + 1 {
     // --jump <sessionId> : bring that running session's window to the front, as a menu click does.
     guard let session = scanLiveSessions(includeTitles: false).first(where: { $0.sessionId == args[i + 1] }) else {
@@ -50,16 +60,17 @@ if let i = args.firstIndex(of: "--finish"), args.count > i + 1 {
         print("error: no running Terminal session with that id")
         exit(1)
     }
-    if session.status != .idle && session.status != .fresh && !args.contains("--force") {
-        print("error: the session is \(statusText(session).lowercased()); add --force to finish it anyway")
-        exit(1)
-    }
+    _ = ttyPath
     do {
-        let result = try finishTerminalSession(tty: ttyPath.replacingOccurrences(of: "/dev/", with: ""), sessionId: session.sessionId)
+        let result = try finishTerminalSession(sessionId: session.sessionId, allowUnfinished: args.contains("--force"))
         Thread.sleep(forTimeInterval: 1.5)
-        closeWindows(ids: result.windowIds)
-        print("finished \(result.entry.kind) session in \(result.entry.cwd); closed windows \(result.windowIds)")
+        completeFinish(result)
+        print("finished \(result.entry.kind) session in \(result.entry.cwd); "
+              + (result.sharedTabTTY.map { "ended it in shared tab \($0)" } ?? "closed windows \(result.windowIds)"))
         exit(0)
+    } catch FinishError.notFinished(let status) {
+        print("error: the session is \(status); add --force to finish it anyway")
+        exit(1)
     } catch {
         print("error: \(error)")
         exit(1)

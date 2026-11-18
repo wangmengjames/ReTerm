@@ -337,14 +337,14 @@ func jumpFor(_ record: SessionRecord, host: Host, locks: [IdeLock]) -> Jump {
             return .url(url: "claude://code/continue?session=\(id)", fallback: nil)
         }
         if let app = host.appPath { return .openApp(path: app) }
-        return .unavailable(reason: "Could not find the app this session runs in.")
+        return .unavailable(reason: L("Could not find the app this session runs in.", "找不到这个会话所在的 App。"))
     case .app:
         if let app = host.appPath { return .openApp(path: app) }
-        return .unavailable(reason: "Could not find the app this session runs in.")
+        return .unavailable(reason: L("Could not find the app this session runs in.", "找不到这个会话所在的 App。"))
     case .tmux:
-        return .unavailable(reason: "This session runs inside tmux. Switch to its tmux window.")
+        return .unavailable(reason: L("This session runs inside tmux. Switch to its tmux window.", "这个会话在 tmux 里，切到对应的 tmux 窗口即可。"))
     case .remote, .unknown:
-        return .unavailable(reason: "Could not find the window this session runs in.")
+        return .unavailable(reason: L("Could not find the window this session runs in.", "找不到这个会话所在的窗口。"))
     }
 }
 
@@ -408,35 +408,37 @@ func sortLiveSessions(_ list: [LiveSession]) -> [LiveSession] {
 
 // MARK: - Wording
 
-private let waitingReasons = [
-    "permission prompt": "Permission request",
-    "dialog open": "Dialog open",
-    "input needed": "Input needed",
-    "sandbox request": "Sandbox request",
-    "worker request": "Approval for a subtask",
-    "goal proposal": "Goal to confirm",
+private let waitingReasons: [String: (en: String, zh: String)] = [
+    "permission prompt": ("Permission request", "权限请求待处理"),
+    "dialog open": ("Dialog open", "有对话框待处理"),
+    "input needed": ("Input needed", "需要你输入"),
+    "sandbox request": ("Sandbox request", "沙盒权限请求"),
+    "worker request": ("Approval for a subtask", "子任务等你批准"),
+    "goal proposal": ("Goal to confirm", "等你确认目标"),
 ]
 
 func statusText(_ s: LiveSession) -> String {
     switch s.status {
-    case .waiting: return s.waitingFor.map { waitingReasons[$0] ?? $0 } ?? "Needs you"
-    case .idle: return "Your turn"
-    case .busy: return "Working"
-    case .shell: return "In shell"
-    case .fresh: return "New"
-    case .unknown: return "Unknown"
+    case .waiting:
+        guard let reason = s.waitingFor else { return L("Needs you", "需要你处理") }
+        return waitingReasons[reason].map { L($0.en, $0.zh) } ?? reason
+    case .idle: return L("Your turn", "等你回复")
+    case .busy: return L("Working", "运行中")
+    case .shell: return L("In shell", "在跑终端命令")
+    case .fresh: return L("New", "新会话")
+    case .unknown: return L("Unknown", "状态未知")
     }
 }
 
-/// "just now", "5 min", "3 h", "2 d".
+/// "just now", "5 min", "3 h", "2 d" (刚刚, 5 分钟, 3 小时, 2 天).
 func shortAge(_ since: Date?, now: Date = Date()) -> String? {
     guard let since else { return nil }
     let minutes = Int(max(0, now.timeIntervalSince(since)) / 60)
-    if minutes < 1 { return "just now" }
-    if minutes < 60 { return "\(minutes) min" }
+    if minutes < 1 { return L("just now", "刚刚") }
+    if minutes < 60 { return L("\(minutes) min", "\(minutes) 分钟") }
     let hours = minutes / 60
-    if hours < 24 { return "\(hours) h" }
-    return "\(hours / 24) d"
+    if hours < 24 { return L("\(hours) h", "\(hours) 小时") }
+    return L("\(hours / 24) d", "\(hours / 24) 天")
 }
 
 // MARK: - Bringing a window forward

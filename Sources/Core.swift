@@ -58,8 +58,13 @@ enum Paths {
 enum History {
     static let limit = 15
 
-    static func load() -> [Snapshot] {
-        guard let data = try? Data(contentsOf: Paths.history) else { return [] }
+    static func load() -> [Snapshot] { loadForChange() ?? [] }
+
+    /// The history to change and save back: nil when the file exists but cannot be read
+    /// (a permission or disk error), so a save never replaces history it could not see.
+    static func loadForChange() -> [Snapshot]? {
+        guard FileManager.default.fileExists(atPath: Paths.history.path) else { return [] }
+        guard let data = try? Data(contentsOf: Paths.history) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         do {
@@ -89,14 +94,14 @@ enum History {
 
     @discardableResult
     static func add(_ snapshot: Snapshot) -> Bool {
-        var all = load()
+        guard var all = loadForChange() else { return false }
         all.insert(snapshot, at: 0)
         return save(all)
     }
 
     /// Fills in missing session topics (for snapshots saved before topics existed) and stores them.
     static func loadFillingTopics() -> [Snapshot] {
-        var all = load()
+        guard var all = loadForChange() else { return [] }
         var changed = false
         for s in all.indices {
             for e in all[s].entries.indices where all[s].entries[e].kind == "claude" && all[s].entries[e].topic == nil {
@@ -109,13 +114,15 @@ enum History {
         return all
     }
 
-    /// Adds a session marked finished to today's Finished group, or starts one.
+    /// Adds a session marked finished to today's Finished group (moved to the top), or starts one.
     @discardableResult
     static func addFinished(_ entry: Entry, now: Date = Date()) -> Bool {
-        var all = load()
-        if let first = all.first, first.finished == true, Calendar.current.isDate(first.date, inSameDayAs: now) {
-            all[0].entries.insert(entry, at: 0)
-            all[0].date = now
+        guard var all = loadForChange() else { return false }
+        if let i = all.firstIndex(where: { $0.finished == true && Calendar.current.isDate($0.date, inSameDayAs: now) }) {
+            var today = all.remove(at: i)
+            today.entries.insert(entry, at: 0)
+            today.date = now
+            all.insert(today, at: 0)
         } else {
             all.insert(Snapshot(date: now, closed: true, entries: [entry], finished: true), at: 0)
         }
@@ -123,7 +130,7 @@ enum History {
     }
 
     static func markReopened(snapshot: UUID, entry: UUID) {
-        var all = load()
+        guard var all = loadForChange() else { return }
         guard let s = all.firstIndex(where: { $0.id == snapshot }),
               let e = all[s].entries.firstIndex(where: { $0.id == entry }) else { return }
         all[s].entries[e].reopened = true
@@ -407,6 +414,7 @@ func windowIds(coveredBy ttys: [String]) throws -> [Int] {
     let source = """
     set targets to \(appleScriptList(ttys.map { "/dev/" + $0 }))
     set ids to {}
+    with timeout of 10 seconds
     tell application "Terminal"
         repeat with w in windows
             try
@@ -421,6 +429,7 @@ func windowIds(coveredBy ttys: [String]) throws -> [Int] {
             end try
         end repeat
     end tell
+    end timeout
     return ids
     """
     var error: NSDictionary?
@@ -441,6 +450,7 @@ func windowIds(coveredBy ttys: [String]) throws -> [Int] {
 func closeWindows(ids: [Int]) {
     guard !ids.isEmpty else { return }
     let source = """
+    with timeout of 10 seconds
     tell application "Terminal"
         repeat with wid in {\(ids.map(String.init).joined(separator: ", "))}
             try
@@ -448,6 +458,7 @@ func closeWindows(ids: [Int]) {
             end try
         end repeat
     end tell
+    end timeout
     """
     var error: NSDictionary?
     NSAppleScript(source: source)?.executeAndReturnError(&error)
@@ -457,17 +468,32 @@ func closeWindows(ids: [Int]) {
 
 enum FinishError: Error {
     case gone
+    /// Not idle (working, waiting on you, or in a shell command), with the status Claude Code reported.
+    case notFinished(status: String)
     case automationDenied
     case script(String)
     case notSaved
 }
 
-/// Saves one Terminal tab's Claude session under Finished and ends it. Returns the ids of the
-/// windows to close once its processes have exited (none when the tab shares its window).
-func finishTerminalSession(tty: String, sessionId: String) throws -> (entry: Entry, windowIds: [Int]) {
-    guard var entry = detectTerminalTabs().first(where: { $0.tty == tty && $0.sessionId == sessionId }) else {
+struct FinishResult {
+    let entry: Entry
+    /// Windows that held only this tab, to close once its processes have exited.
+    let windowIds: [Int]
+    /// Set instead when the tab shares its window: only Claude was ended, and the tab's shell is told to exit.
+    let sharedTabTTY: String?
+}
+
+/// Saves one Terminal tab's Claude session under Finished and ends it. One detection pass decides
+/// everything (which tab, whether it is idle), and nothing ends before every check has passed.
+/// Unless `allowUnfinished`, a session that is not idle throws `.notFinished`.
+func finishTerminalSession(sessionId: String, allowUnfinished: Bool) throws -> FinishResult {
+    // By session id: the tab's login tty can differ from Claude's own (claude run under `script`).
+    guard var entry = detectTerminalTabs().first(where: { $0.kind == "claude" && $0.sessionId == sessionId }) else {
         throw FinishError.gone
     }
+    let status = entry.status ?? "unknown"
+    if status != "idle" && !allowUnfinished { throw FinishError.notFinished(status: status) }
+    let tty = entry.tty
     // Nothing was ever sent, so there is nothing to resume: reopen it as a shell in its folder.
     let size = transcriptURL(sessionId: sessionId, cwd: entry.cwd)
         .flatMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize } ?? 0
@@ -484,9 +510,63 @@ func finishTerminalSession(tty: String, sessionId: String) throws -> (entry: Ent
     } catch {
         throw FinishError.script("\(error)")
     }
+    let claudePid = liveClaudeSessions().first(where: { $0.value.sessionId == sessionId })?.key
     guard History.addFinished(entry) else { throw FinishError.notSaved }
+    if ids.isEmpty, let claudePid {
+        // The tab shares its window with other tabs. Closing the window would close them too, so end
+        // only Claude; `completeFinish` then has the shell exit cleanly, which closes just this tab.
+        hangUp(processTreeOf: claudePid)
+        return FinishResult(entry: entry, windowIds: [], sharedTabTTY: tty)
+    }
     hangUp(ttys: [tty])
-    return (entry, ids)
+    return FinishResult(entry: entry, windowIds: ids, sharedTabTTY: nil)
+}
+
+/// The second half of finishing, once the processes have had a moment to exit.
+func completeFinish(_ result: FinishResult) {
+    if let tty = result.sharedTabTTY {
+        exitShell(inTab: tty)
+    } else {
+        closeWindows(ids: result.windowIds)
+    }
+}
+
+/// Types `exit` into the tab on this tty, only if nothing but its shell runs there any more,
+/// so the shell ends cleanly and Terminal closes the tab (its default for a clean exit).
+func exitShell(inTab tty: String) {
+    guard tty.range(of: "^ttys[0-9]{1,5}$", options: .regularExpression) != nil else { return }
+    let source = """
+    with timeout of 10 seconds
+    tell application "Terminal"
+        repeat with w in windows
+            repeat with t in tabs of w
+                if (tty of t) is "/dev/\(tty)" then
+                    if busy of t is false then do script "exit" in t
+                    return
+                end if
+            end repeat
+        end repeat
+    end tell
+    end timeout
+    """
+    var error: NSDictionary?
+    NSAppleScript(source: source)?.executeAndReturnError(&error)
+}
+
+/// Sends SIGHUP to a process and everything it started.
+func hangUp(processTreeOf root: Int32) {
+    let procs = processTable()
+    var children: [Int32: [Int32]] = [:]
+    for p in procs { children[p.ppid, default: []].append(p.pid) }
+    var tree: [Int32] = []
+    var queue = [root]
+    while let pid = queue.popLast() {
+        tree.append(pid)
+        queue.append(contentsOf: children[pid] ?? [])
+    }
+    for pid in tree.reversed() where pid != getpid() && pid > 1 {
+        kill(pid, SIGHUP)
+    }
 }
 
 /// Sends SIGHUP to everything running on the given ttys, the same signal Terminal sends when a window closes.
