@@ -102,6 +102,14 @@ if let i = args.firstIndex(of: "--codex-sessions") {
     exit(0)
 }
 
+if let i = args.firstIndex(of: "--track"), args.count > i + 1 {
+    // --track <seconds> : run only the tracker for a while, then stop (development aid).
+    Tracker.shared.onRecorded = { print("recorded a closed session") }
+    Tracker.shared.start()
+    RunLoop.main.run(until: Date().addingTimeInterval(Double(args[i + 1]) ?? 10))
+    exit(0)
+}
+
 if args.contains("--self-test") {
     // Exercises history and pins in a scratch data folder. Refuses to touch the real one.
     guard ProcessInfo.processInfo.environment["RETERM_HOME"]?.isEmpty == false else {
@@ -180,6 +188,21 @@ if args.contains("--self-test") {
     let held = try? FileHandle(forReadingFrom: probe)
     check(Codex.openFiles(of: getpid()).contains { $0.hasSuffix("/open-file-probe.jsonl") }, "open files of a process can be listed")
     try? held?.close()
+    History.save([])
+    let day = Date(timeIntervalSince1970: 1_800_000_000)
+    let s1 = Entry(kind: "claude", cwd: "/tmp/a", tty: "ttys001", sessionId: "sess-1", topic: "One")
+    let s2 = Entry(kind: "claude", cwd: "/tmp/b", tty: "ttys002", sessionId: "sess-2", topic: "Two")
+    check(History.addFinished(s1, now: day.addingTimeInterval(-90_000)), "a session finished the day before")
+    check(History.addClosedAutomatically(s2, at: day), "a session that ended by itself is saved")
+    check(History.addClosedAutomatically(Entry(kind: "claude", cwd: "/tmp/a", tty: "ttys009", sessionId: "sess-1", topic: "One again"), at: day.addingTimeInterval(60)),
+          "the earlier session ends again")
+    let groups = History.load()
+    check(groups.count == 1 && groups[0].auto == true && groups[0].entries.count == 2, "both are in one Closed group for the day")
+    check(groups[0].entries.first?.topic == "One again" && groups.flatMap(\.entries).filter { $0.sessionId == "sess-1" }.count == 1,
+          "a session is listed once, in its newest record")
+    check(History.addClosedAutomatically(s2, at: day.addingTimeInterval(-200_000)) && History.load().last?.entries.first?.sessionId == "sess-2",
+          "a session recovered from before is filed under its own day")
+    check(History.lastClosed()?.sessionId == "sess-1", "a session closed by hand is what the shortcut reopens")
     // An old history file without the newer fields must still load.
     let old = #"[{"id":"7F2C1D7E-0000-4000-8000-000000000001","date":"2026-11-18T10:00:00Z","closed":true,"entries":[{"id":"7F2C1D7E-0000-4000-8000-000000000002","kind":"claude","cwd":"/tmp/x","tty":"ttys009","sessionId":"old-1","reopened":false}]}]"#
     try? old.write(to: Paths.history, atomically: true, encoding: .utf8)

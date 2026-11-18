@@ -54,6 +54,8 @@ struct Snapshot: Codable {
     var entries: [Entry]
     /// Sessions marked finished one at a time from the live list, collected per day.
     var finished: Bool? = nil
+    /// Sessions ReTerm noticed ending by itself (a window closed by hand, a restart), collected per day.
+    var auto: Bool? = nil
 }
 
 // MARK: - Paths
@@ -70,13 +72,19 @@ enum Paths {
     }()
     static let history = support.appendingPathComponent("history.json")
     static let pins = support.appendingPathComponent("pins.json")
+    static let seen = support.appendingPathComponent("seen.json")
+    /// Claude Code's own folder. RETERM_CLAUDE_HOME points ReTerm at another one (used for testing).
+    static let claudeHome: URL = {
+        let custom = ProcessInfo.processInfo.environment["RETERM_CLAUDE_HOME"]
+            .flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
+        return custom ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude", isDirectory: true)
+    }()
     static let launch: URL = {
         let dir = support.appendingPathComponent("launch", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
-    static let claudeSessions = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".claude/sessions", isDirectory: true)
+    static let claudeSessions = claudeHome.appendingPathComponent("sessions", isDirectory: true)
 }
 
 // MARK: - History
@@ -151,6 +159,29 @@ enum History {
         } else {
             all.insert(Snapshot(date: now, closed: true, entries: [entry], finished: true), at: 0)
         }
+        return save(all)
+    }
+
+    static let autoGroupLimit = 40
+
+    /// Saves a session that ended by itself in that day's "Closed" group. The session is listed
+    /// once: an older record of the same session is replaced by this one.
+    @discardableResult
+    static func addClosedAutomatically(_ entry: Entry, at date: Date) -> Bool {
+        guard var all = loadForChange() else { return false }
+        if entry.sessionId != nil {
+            for i in all.indices { all[i].entries.removeAll { $0.isSession && $0.pinKey == entry.pinKey } }
+            all.removeAll { $0.entries.isEmpty }
+        }
+        if let i = all.firstIndex(where: { $0.auto == true && Calendar.current.isDate($0.date, inSameDayAs: date) }) {
+            all[i].entries.insert(entry, at: 0)
+            if all[i].entries.count > autoGroupLimit { all[i].entries.removeLast(all[i].entries.count - autoGroupLimit) }
+            all[i].date = max(all[i].date, date)
+        } else {
+            all.append(Snapshot(date: date, closed: true, entries: [entry], auto: true))
+        }
+        // Newest first; a session recovered after a restart is dated to when it was last seen.
+        all.sort { $0.date > $1.date }
         return save(all)
     }
 
@@ -309,7 +340,7 @@ func projectSlug(_ cwd: String) -> String {
 
 func transcriptURL(sessionId: String, cwd: String? = nil) -> URL? {
     guard isValidSessionId(sessionId) else { return nil }
-    let projects = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects", isDirectory: true)
+    let projects = Paths.claudeHome.appendingPathComponent("projects", isDirectory: true)
     if let cwd {
         // Usually the transcript is under the cwd's own folder; long or unusual paths are found by the scan below.
         let file = projects.appendingPathComponent(projectSlug(cwd), isDirectory: true).appendingPathComponent("\(sessionId).jsonl")
@@ -646,6 +677,8 @@ func finishTerminalSession(sessionId: String, allowUnfinished: Bool) throws -> F
     }
     let claudePid = liveClaudeSessions().first(where: { $0.value.sessionId == sessionId })?.key
     entry.bounds = (try? windowBounds())?[tty]
+    // Saved here, so the tracker must not save it a second time when it sees the session end.
+    Tracker.shared.suppress(sessionIds: [sessionId])
     guard History.addFinished(entry) else { throw FinishError.notSaved }
     if ids.isEmpty, let claudePid {
         // The tab shares its window with other tabs. Closing the window would close them too, so end

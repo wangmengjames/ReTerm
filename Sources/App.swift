@@ -32,6 +32,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         HotKey.register()
         ManageWindowController.shared.onChange = { [weak self] in self?.model.reload() }
         ManageWindowController.shared.hideTitles = { [weak self] in self?.model.hideTitles ?? false }
+        Tracker.shared.onRecorded = { [weak self] in self?.model.reload() }
+        Tracker.shared.start()
 
         // The count of Claude sessions that need you, next to the icon. Reading a few small files, so often is fine.
         refreshBadge()
@@ -111,6 +113,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             UserDefaults.standard.set(hide, forKey: PanelModel.hideTitlesKey)
             model.hideTitles = hide
             ManageWindowController.shared.settingsChanged()
+        case .toggleAutoRecord:
+            let on = !Tracker.enabled
+            Tracker.enabled = on
+            model.autoRecord = on
+            if on { Tracker.shared.start() } else { Tracker.shared.stop() }
         case .setLanguage(let language):
             Lang.setting = language
             model.language = language
@@ -334,6 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             inform(L("The snapshot could not be saved", "没能保存快照"), L("Nothing was closed.", "没有关闭任何东西。"))
             return
         }
+        Tracker.shared.suppress(sessionIds: entries.compactMap(\.sessionId))
         hangUp(ttys: entries.map(\.tty))
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             closeWindows(ids: ids)

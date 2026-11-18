@@ -19,6 +19,7 @@ enum PanelAction {
     case checkForUpdates
     case toggleLaunchAtLogin
     case toggleHideTitles
+    case toggleAutoRecord
     case setLanguage(AppLanguage)
     case clearHistory
     case quit
@@ -33,6 +34,7 @@ final class PanelModel: ObservableObject {
     @Published var openTabs = 0
     @Published var update: Updater.Release?
     @Published var hideTitles = UserDefaults.standard.bool(forKey: PanelModel.hideTitlesKey)
+    @Published var autoRecord = Tracker.enabled
     @Published var launchAtLogin = false
     @Published var language = Lang.setting
     @Published var showEarlier = false
@@ -76,6 +78,18 @@ final class PanelModel: ObservableObject {
         }
     }
 
+    /// Shown open: everything from today (finished, closed by hand, saved), or failing that the newest group.
+    var recent: [Snapshot] {
+        let today = history.filter { Calendar.current.isDate($0.date, inSameDayAs: now) }
+        return today.isEmpty ? Array(history.prefix(1)) : today
+    }
+
+    /// Folded away under "Earlier".
+    var earlier: [Snapshot] {
+        let shown = Set(recent.map(\.id))
+        return history.filter { !shown.contains($0.id) }
+    }
+
     /// A title, or its folder's name while titles are hidden.
     func shown(_ title: String, cwd: String) -> String {
         displayTitle(title, cwd: cwd, hidden: hideTitles)
@@ -89,14 +103,17 @@ final class PanelModel: ObservableObject {
 
     func heading(_ snapshot: Snapshot) -> String {
         let n = snapshot.entries.count
-        if snapshot.finished == true {
-            if Calendar.current.isDateInToday(snapshot.date) { return L("Finished today (\(n))", "今天完成（\(n)）") }
+        if snapshot.finished == true || snapshot.auto == true {
+            let finished = snapshot.finished == true
+            if Calendar.current.isDateInToday(snapshot.date) {
+                return finished ? L("Finished today (\(n))", "今天完成（\(n)）") : L("Closed today (\(n))", "今天关闭（\(n)）")
+            }
             let f = DateFormatter()
             f.locale = Lang.locale
             f.dateStyle = .medium
             f.timeStyle = .none
             let day = f.string(from: snapshot.date)
-            return L("Finished \(day) (\(n))", "\(day) 完成（\(n)）")
+            return finished ? L("Finished \(day) (\(n))", "\(day) 完成（\(n)）") : L("Closed \(day) (\(n))", "\(day) 关闭（\(n)）")
         }
         let relative = RelativeDateTimeFormatter()
         relative.locale = Lang.locale
@@ -159,6 +176,8 @@ struct PanelView: View {
             Button(L("Reopen Last Closed  \(HotKey.display)", "重新打开上一个关闭的  \(HotKey.display)")) { model.handle(.reopenLast) }
             Button(L("Search & Manage…", "搜索与管理…")) { model.handle(.manage) }
             Divider()
+            Toggle(L("Remember Sessions I Close Myself", "自动记住我自己关掉的会话"),
+                   isOn: Binding(get: { model.autoRecord }, set: { _ in model.handle(.toggleAutoRecord) }))
             Toggle(L("Hide Session Titles", "隐藏会话标题"),
                    isOn: Binding(get: { model.hideTitles }, set: { _ in model.handle(.toggleHideTitles) }))
             Toggle(L("Launch at Login", "登录时启动"),
@@ -208,12 +227,14 @@ struct PanelView: View {
                 Divider().padding(.vertical, 6).padding(.horizontal, 6)
             }
 
-            if let latest = model.history.first {
-                SnapshotSection(snapshot: latest, model: model)
-                if model.history.count > 1 {
+            if !model.history.isEmpty {
+                ForEach(model.recent, id: \.id) { snapshot in
+                    SnapshotSection(snapshot: snapshot, model: model)
+                }
+                if !model.earlier.isEmpty {
                     earlierToggle
                     if model.showEarlier {
-                        ForEach(Array(model.history.dropFirst()), id: \.id) { snapshot in
+                        ForEach(model.earlier, id: \.id) { snapshot in
                             SnapshotSection(snapshot: snapshot, model: model)
                         }
                     }
@@ -235,7 +256,7 @@ struct PanelView: View {
             HStack(spacing: 4) {
                 Image(systemName: model.showEarlier ? "chevron.down" : "chevron.right")
                     .font(.system(size: 9, weight: .semibold))
-                Text(L("Earlier (\(model.history.count - 1))", "更早（\(model.history.count - 1)）"))
+                Text(L("Earlier (\(model.earlier.count))", "更早（\(model.earlier.count)）"))
             }
             .font(.caption.weight(.semibold))
             .foregroundColor(.secondary)
@@ -550,10 +571,15 @@ func renderPanel(to path: String, dark: Bool, sample: Bool) -> Bool {
             Entry(kind: "claude", cwd: "/Users/me/Codex/ReTerm", tty: "", sessionId: "a", topic: "ReTerm live sessions"),
             Entry(kind: "claude", cwd: "/Users/me/Teaching/VCE", tty: "", sessionId: "b", reopened: true, topic: "VCE 练习卷"),
         ]
-        let closed = Snapshot(date: now.addingTimeInterval(-3 * 3600), closed: true, entries: [
+        let closed = Snapshot(date: now.addingTimeInterval(-50 * 3600), closed: true, entries: [
             Entry(kind: "shell", cwd: "/Users/me/Downloads", tty: ""),
         ])
-        model.history = [finished, closed, closed]
+        let auto = Snapshot(date: now.addingTimeInterval(-1800), closed: true, entries: [
+            Entry(kind: "claude", cwd: "/Users/me/Projects/site", tty: "", sessionId: "d", topic: "Fix the nav bar on mobile"),
+        ], auto: true)
+        var older = closed
+        older.id = UUID()
+        model.history = [finished, auto, closed, older]
         model.pins = [Entry(kind: "codex", cwd: "/Users/me/Projects/api", tty: "", sessionId: "c", topic: "API rate limiter")]
         model.openTabs = 3
     } else {
