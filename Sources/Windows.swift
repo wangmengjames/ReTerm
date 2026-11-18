@@ -18,9 +18,11 @@ private func runAppleScript(_ source: String) throws -> NSAppleEventDescriptor {
 }
 
 /// Frame of the window each tab lives in (left, top, right, bottom), keyed by tty ("ttys003").
-func windowBounds() throws -> [String: [Int]] {
+func windowBounds(timeout: Int = 5) throws -> [String: [Int]] {
+    // Asking whether it is running sends Terminal nothing, so this can never launch it.
     let source = """
-    with timeout of 5 seconds
+    if not (application "Terminal" is running) then return ""
+    with timeout of \(timeout) seconds
         tell application "Terminal"
             set out to ""
             repeat with w in windows

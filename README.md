@@ -24,14 +24,14 @@ If you run several Claude Code sessions at once, you end up with a wall of Termi
 
 - **Live sessions**: every running Claude Code session with what it is doing (*Permission request*, *Your turn*, *Working*), where it runs and for how long. Click one to bring its window to the front: the exact Terminal or iTerm2 tab, the VS Code window holding its folder, or the session in the Claude app.
 - **Mark one finished**: click **Done** on a Terminal session. It is saved under **Finished today** and its window closes; reopen it from there whenever you like, with the conversation resumed. A session that is still working asks first.
-- **Nothing gets lost when you just close the window**: a Claude Code session that ends on its own terms (you closed its Terminal window, quit Terminal, or restarted the Mac) is saved under **Closed today** automatically, ready to reopen with the conversation resumed. Turn it off in ⚙︎ settings with **Remember Sessions I Close Myself**.
+- **Closing the window does not lose the session**: a Claude Code session running in Terminal.app that ends without ReTerm being told (you closed its window, typed `/exit` or `/clear`, quit Terminal, or restarted the Mac) is saved under **Closed today** automatically, ready to reopen with the conversation resumed. Turn it off in ⚙︎ settings with **Remember Sessions I Close Myself**.
 - **A count of sessions that need you**: the number next to the menu bar icon is how many sessions are stopped on a permission prompt or a question.
 - **Hide Session Titles** (in ⚙︎ settings): shows folder names instead of session titles, for screen sharing.
 - **English or Chinese**: follows the system language, or pick one in ⚙︎ settings.
 - **Save & Close All Terminal Windows**: records every open Terminal tab, then closes them. Warns you first if a Claude session is still working.
 - **Entries you can recognise**: each one shows the session's title (the same one Claude Code puts in the window title bar) and its folder.
 - **Reopen one or all**: Claude Code sessions are resumed with `claude --resume`; plain shells reopen in their folder. Reopened entries get a tick.
-- **History**: the last 15 snapshots are kept under **Earlier**.
+- **History**: everything from today is shown open; earlier days (the last 30 groups) are kept under **Earlier**.
 - **Save Snapshot Only**: record without closing anything.
 - **Windows come back where they were**: each reopened window returns to the position and size it had when it was saved.
 - **Reopen the last one from the keyboard**: `⌃⌥⌘T` anywhere brings back the most recently closed tab, like `⌘⇧T` in a browser.
@@ -83,6 +83,7 @@ History is stored locally in `~/Library/Application Support/ReTerm/history.json`
 ## Limits
 
 - Save & Close and Reopen work with Terminal.app only (not iTerm2, Ghostty or the VS Code terminal). The live session list covers Terminal, iTerm2, VS Code and its relatives (Cursor, Windsurf, VSCodium) and the Claude app; a session inside tmux is listed but cannot be jumped to. Marking a session finished works for Terminal sessions; if its tab shares a window with other tabs, the session ends but the tab stays open.
+- Automatic recording of sessions you close yourself covers Terminal.app only (not iTerm2, VS Code, the Claude app or tmux). A session in which nothing was ever sent is not recorded. A day's **Closed** group holds at most 40 sessions.
 - Scrollback and running commands are not restored. A plain shell comes back as a new shell in the same folder.
 - The format of `~/.claude/sessions` and of session transcripts is not a documented interface and may change between Claude Code versions.
 - After an update, macOS may ask again for permission to control Terminal, because the app is not signed with a developer certificate.

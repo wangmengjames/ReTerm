@@ -90,7 +90,7 @@ enum Paths {
 // MARK: - History
 
 enum History {
-    static let limit = 15
+    static let limit = 30
 
     static func load() -> [Snapshot] { loadForChange() ?? [] }
 
@@ -169,6 +169,12 @@ enum History {
     @discardableResult
     static func addClosedAutomatically(_ entry: Entry, at date: Date) -> Bool {
         guard var all = loadForChange() else { return false }
+        // Already saved on purpose (Done, Save & Close, also from another ReTerm process or just before
+        // a quit) and not reopened since: that record stands.
+        if entry.sessionId != nil, all.contains(where: { s in
+            s.closed && s.auto != true && s.date > date.addingTimeInterval(-120)
+                && s.entries.contains { $0.isSession && $0.pinKey == entry.pinKey && !$0.reopened }
+        }) { return false }
         if entry.sessionId != nil {
             for i in all.indices { all[i].entries.removeAll { $0.isSession && $0.pinKey == entry.pinKey } }
             all.removeAll { $0.entries.isEmpty }
@@ -183,6 +189,22 @@ enum History {
         // Newest first; a session recovered after a restart is dated to when it was last seen.
         all.sort { $0.date > $1.date }
         return save(all)
+    }
+
+    /// Sessions the tracker filed as closed are running again (resumed by hand): show them as reopened.
+    @discardableResult
+    static func markResumed(sessionIds: Set<String>) -> Bool {
+        guard !sessionIds.isEmpty, var all = loadForChange() else { return false }
+        var changed = false
+        for s in all.indices where all[s].auto == true {
+            for e in all[s].entries.indices where !all[s].entries[e].reopened {
+                if let id = all[s].entries[e].sessionId, sessionIds.contains(id) {
+                    all[s].entries[e].reopened = true
+                    changed = true
+                }
+            }
+        }
+        return changed && save(all)
     }
 
     static func markReopened(snapshot: UUID, entry: UUID) {
@@ -677,9 +699,9 @@ func finishTerminalSession(sessionId: String, allowUnfinished: Bool) throws -> F
     }
     let claudePid = liveClaudeSessions().first(where: { $0.value.sessionId == sessionId })?.key
     entry.bounds = (try? windowBounds())?[tty]
+    guard History.addFinished(entry) else { throw FinishError.notSaved }
     // Saved here, so the tracker must not save it a second time when it sees the session end.
     Tracker.shared.suppress(sessionIds: [sessionId])
-    guard History.addFinished(entry) else { throw FinishError.notSaved }
     if ids.isEmpty, let claudePid {
         // The tab shares its window with other tabs. Closing the window would close them too, so end
         // only Claude; `completeFinish` then has the shell exit cleanly, which closes just this tab.

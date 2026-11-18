@@ -203,6 +203,17 @@ if args.contains("--self-test") {
     check(History.addClosedAutomatically(s2, at: day.addingTimeInterval(-200_000)) && History.load().last?.entries.first?.sessionId == "sess-2",
           "a session recovered from before is filed under its own day")
     check(History.lastClosed()?.sessionId == "sess-1", "a session closed by hand is what the shortcut reopens")
+    check(History.markResumed(sessionIds: ["sess-1"]) && History.lastClosed()?.sessionId == "sess-2",
+          "a closed session resumed by hand is shown as reopened")
+    check(!History.markResumed(sessionIds: ["sess-1"]), "and only once")
+    let s3 = Entry(kind: "claude", cwd: "/tmp/c", tty: "ttys003", sessionId: "sess-3", topic: "Three")
+    let later = day.addingTimeInterval(3600)
+    check(History.addFinished(s3, now: later), "a session marked Done")
+    check(!History.addClosedAutomatically(s3, at: later.addingTimeInterval(5)), "is not filed again when it is seen ending")
+    check(History.load().first { $0.finished == true && $0.entries.contains { $0.sessionId == "sess-3" } } != nil, "and stays under Finished")
+    History.markReopened(entry: s3.id)
+    check(History.addClosedAutomatically(s3, at: later.addingTimeInterval(30)), "but reopened and closed by hand, it is filed as closed")
+    check(History.load().flatMap(\.entries).filter { $0.sessionId == "sess-3" }.count == 1, "still listed once")
     // An old history file without the newer fields must still load.
     let old = #"[{"id":"7F2C1D7E-0000-4000-8000-000000000001","date":"2026-11-18T10:00:00Z","closed":true,"entries":[{"id":"7F2C1D7E-0000-4000-8000-000000000002","kind":"claude","cwd":"/tmp/x","tty":"ttys009","sessionId":"old-1","reopened":false}]}]"#
     try? old.write(to: Paths.history, atomically: true, encoding: .utf8)

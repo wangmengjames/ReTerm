@@ -56,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return
         }
         guard let button = statusItem.button else { return }
+        Tracker.shared.checkNow()
         model.reload()
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
@@ -368,6 +369,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     /// The shortcut: brings back the most recently closed entry that has not been reopened yet.
     private func reopenLastClosed() {
+        // A window closed a moment ago must already count.
+        Tracker.shared.checkNow()
         guard let entry = History.lastClosed() else {
             NSSound.beep()
             return

@@ -41,8 +41,10 @@ final class Tracker {
     // All state below is touched on the main thread only.
     private var known: [Int32: Tracked] = [:]
     private var notInTerminal: Set<Int32> = []
-    private var suppressed: [String: Date] = [:]
+    /// Session id -> system uptime until which its ending is ignored. Uptime, not the clock: sleep must not use it up.
+    private var suppressed: [String: TimeInterval] = [:]
     private var written: [Tracked] = []
+    private var writtenAt = Date.distantPast
     private var tick = 0
     private var looking = false
     private var timer: Timer?
@@ -66,14 +68,29 @@ final class Tracker {
         known = [:]
         notInTerminal = []
         written = []
+        writtenAt = .distantPast
         // Nothing is being watched any more, so nothing may be "recovered" from this later.
         try? FileManager.default.removeItem(at: Paths.seen)
     }
 
     /// These sessions are about to be closed on purpose and are already saved (Done, Save & Close).
     func suppress(sessionIds: [String]) {
-        let until = Date().addingTimeInterval(90)
+        let until = ProcessInfo.processInfo.systemUptime + 90
         for id in sessionIds { suppressed[id] = until }
+    }
+
+    /// Saves, right now, any watched session whose process has ended. For callers about to read the history.
+    func checkNow() {
+        guard timer != nil else { return }
+        let now = Date()
+        let liveIds = Set(liveRecords().map(\.sessionId))
+        var recorded = false
+        for t in Array(known.values) where !Tracker.isAlive(t) {
+            known.removeValue(forKey: t.pid)
+            if !liveIds.contains(t.sessionId), record(t, at: now) { recorded = true }
+        }
+        persist()
+        if recorded { onRecorded() }
     }
 
     // MARK: Looking
@@ -91,7 +108,8 @@ final class Tracker {
         if tick % 20 == 0 { notInTerminal = [] }
         let known = self.known
         let skip = notInTerminal
-        let periodic = tick % 5 == 0
+        // A frame is only needed when a session is reopened, so once a minute is plenty.
+        let periodic = tick % 20 == 0
         queue.async {
             let records = liveRecords()
             let newcomers = records.filter { known[$0.pid] == nil && !skip.contains($0.pid) }
@@ -115,9 +133,17 @@ final class Tracker {
     private func apply(records: [SessionRecord], newcomers: [SessionRecord], tabs: [Entry], starts: [Int32: Date],
                        gone: [Tracked], readFrames: Bool) {
         guard timer != nil else { return }      // stopped while this look was under way
-        // A session can change under the same process (/clear, /resume): follow it.
+        let now = Date()
+        var recorded = false
+        // Sessions seen starting, in Terminal or not: one of them may be a conversation filed as closed, resumed by hand.
+        var appeared = Set(newcomers.map(\.sessionId))
+        // A session can change under the same process (/clear, /resume): save the one it replaces, then follow it.
         for r in records {
             guard var t = known[r.pid], !gone.contains(where: { $0.pid == r.pid }) else { continue }
+            if t.sessionId != r.sessionId {
+                appeared.insert(r.sessionId)
+                if !records.contains(where: { $0.sessionId == t.sessionId }), record(t, at: now) { recorded = true }
+            }
             t.sessionId = r.sessionId
             t.cwd = r.cwd
             t.name = r.userName
@@ -131,19 +157,21 @@ final class Tracker {
                 notInTerminal.insert(r.pid)
             }
         }
-        if readFrames, let frames = try? windowBounds() {
+        if readFrames, let frames = try? windowBounds(timeout: 1) {
             for (pid, t) in known {
                 if let frame = frames[t.tty] { known[pid]?.bounds = frame }
             }
         }
-        let now = Date()
-        suppressed = suppressed.filter { $0.value > now }
-        var recorded = false
+        let awake = ProcessInfo.processInfo.systemUptime
+        suppressed = suppressed.filter { $0.value > awake }
         for t in gone {
             // Its latest state, including a session id that changed since the look began.
             guard let last = known.removeValue(forKey: t.pid) else { continue }
+            // Still running under another process (/exit, then `claude --resume` in the same tab): not closed.
+            if records.contains(where: { $0.pid != t.pid && $0.sessionId == last.sessionId }) { continue }
             if record(last, at: now) { recorded = true }
         }
+        if History.markResumed(sessionIds: appeared) { recorded = true }
         notInTerminal = notInTerminal.filter { pid in records.contains { $0.pid == pid } }
         persist()
         if recorded { onRecorded() }
@@ -152,7 +180,8 @@ final class Tracker {
     /// Saves an ended session. False if there was nothing worth saving.
     @discardableResult
     private func record(_ t: Tracked, at date: Date) -> Bool {
-        if suppressed[t.sessionId] != nil { return false }
+        // One use: once its ending has been seen, a later reopen-and-close of the same session counts again.
+        if suppressed.removeValue(forKey: t.sessionId) != nil { return false }
         // Nothing was ever sent: there is no conversation to come back to.
         let transcript = transcriptURL(sessionId: t.sessionId, cwd: t.cwd)
         let size = transcript.flatMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize } ?? 0
@@ -167,11 +196,15 @@ final class Tracker {
 
     private func persist() {
         let sessions = known.values.sorted { $0.pid < $1.pid }
-        guard sessions != written else { return }
+        let now = Date()
+        // Rewritten every minute while anything is watched, so its date really is "last seen".
+        let stale = !sessions.isEmpty && now.timeIntervalSince(writtenAt) > 60
+        guard sessions != written || stale else { return }
         written = sessions
+        writtenAt = now
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        if let data = try? encoder.encode(Seen(date: Date(), sessions: sessions)) {
+        if let data = try? encoder.encode(Seen(date: now, sessions: sessions)) {
             try? data.write(to: Paths.seen, options: .atomic)
         }
     }
@@ -183,9 +216,12 @@ final class Tracker {
         decoder.dateDecodingStrategy = .iso8601
         guard let data = try? Data(contentsOf: Paths.seen), let seen = try? decoder.decode(Seen.self, from: data) else { return }
         var recorded = false
+        let liveIds = Set(liveRecords().map(\.sessionId))
         for t in seen.sessions {
             if Tracker.isAlive(t) {
                 known[t.pid] = t
+            } else if liveIds.contains(t.sessionId) {
+                continue        // running again under another process
             } else if record(t, at: seen.date) {
                 recorded = true
             }
