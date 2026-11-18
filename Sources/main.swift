@@ -77,6 +77,76 @@ if let i = args.firstIndex(of: "--finish"), args.count > i + 1 {
     }
 }
 
+if args.contains("--bounds-now") {
+    // Print each open Terminal tab's window frame. Read-only.
+    do {
+        printJSON(try windowBounds())
+        exit(0)
+    } catch {
+        print("error: \(error)")
+        exit(1)
+    }
+}
+
+if args.contains("--pins") {
+    printJSON(Pins.load())
+    exit(0)
+}
+
+if let i = args.firstIndex(of: "--codex-sessions") {
+    // --codex-sessions [hours] : how many recent Codex terminal sessions can be read (count only). Read-only.
+    let hours = args.count > i + 1 ? Double(args[i + 1]) ?? 24 : 24
+    let found = Codex.sessions(modifiedSince: Date().addingTimeInterval(-hours * 3600))
+    let named = found.filter { Codex.topic(sessionId: $0.id) != nil }.count
+    print("\(found.count) Codex sessions in the last \(Int(hours)) h, \(named) with a name")
+    exit(0)
+}
+
+if args.contains("--self-test") {
+    // Exercises history and pins in a scratch data folder. Refuses to touch the real one.
+    guard ProcessInfo.processInfo.environment["RETERM_HOME"]?.isEmpty == false else {
+        print("error: set RETERM_HOME to an empty scratch folder first")
+        exit(1)
+    }
+    var failures = 0
+    func check(_ ok: Bool, _ what: String) {
+        print((ok ? "ok   " : "FAIL ") + what)
+        if !ok { failures += 1 }
+    }
+    History.save([])
+    let a = Entry(kind: "claude", cwd: "/tmp/a", tty: "ttys001", sessionId: "aaa-1", topic: "First", bounds: [1, 2, 300, 400])
+    let b = Entry(kind: "codex", cwd: "/tmp/b", tty: "ttys002", sessionId: "bbb-2", topic: "Second")
+    let c = Entry(kind: "shell", cwd: "/tmp/c", tty: "ttys003")
+    check(History.add(Snapshot(closed: false, entries: [c])), "snapshot-only group saved")
+    check(History.lastClosed() == nil, "a snapshot that closed nothing is not 'last closed'")
+    check(History.add(Snapshot(closed: true, entries: [a, b])), "closed group saved")
+    check(History.addFinished(c), "finished entry saved")
+    check(History.load().count == 3, "three groups stored")
+    check(History.load().flatMap(\.entries).first { $0.id == a.id }?.bounds == [1, 2, 300, 400], "window frame survives a save")
+    check(History.lastClosed()?.id == c.id, "last closed is the newest entry")
+    History.markReopened(entry: c.id)
+    check(History.lastClosed()?.id == a.id, "after reopening it, the next one is last closed")
+    check(History.delete(entry: a.id), "delete one entry")
+    check(History.lastClosed()?.id == b.id, "deleted entry is gone")
+    check(History.delete(entry: b.id) && History.load().count == 2, "a group is removed once empty")
+    check(Pins.load().isEmpty, "no pins to start with")
+    check(Pins.toggle(a) && Pins.contains(a), "pin")
+    check(Pins.toggle(b) && Pins.load().count == 2, "pin a second")
+    check(Pins.load().first?.id != a.id, "a pin is its own copy")
+    check(Pins.toggle(a) && !Pins.contains(a) && Pins.load().count == 1, "unpin")
+    check(a.pinKey == "claude:aaa-1" && c.pinKey == "shell:/tmp/c", "pin keys")
+    // An old history file without the newer fields must still load.
+    let old = #"[{"id":"7F2C1D7E-0000-4000-8000-000000000001","date":"2026-11-18T10:00:00Z","closed":true,"entries":[{"id":"7F2C1D7E-0000-4000-8000-000000000002","kind":"claude","cwd":"/tmp/x","tty":"ttys009","sessionId":"old-1","reopened":false}]}]"#
+    try? old.write(to: Paths.history, atomically: true, encoding: .utf8)
+    check(History.load().first?.entries.first?.sessionId == "old-1", "history written by 0.1.0 still loads")
+    try? "not json".write(to: Paths.history, atomically: true, encoding: .utf8)
+    check(History.load().isEmpty, "unreadable history reads as empty")
+    let aside = (try? FileManager.default.contentsOfDirectory(atPath: Paths.support.path))?.contains { $0.hasPrefix("history.unreadable-") } ?? false
+    check(aside, "unreadable history is set aside, not overwritten")
+    print(failures == 0 ? "all passed" : "\(failures) failed")
+    exit(failures == 0 ? 0 : 1)
+}
+
 if args.contains("--history") {
     printJSON(History.loadFillingTopics())
     exit(0)
@@ -84,15 +154,22 @@ if args.contains("--history") {
 
 if let i = args.firstIndex(of: "--print-script"), args.count > i + 2 {
     // --print-script <cwd> <sessionId|-> : show the launch script without running it.
+    // Add --codex for a Codex session.
     let id = args[i + 2] == "-" ? nil : args[i + 2]
-    print(launchScript(for: Entry(kind: id == nil ? "shell" : "claude", cwd: args[i + 1], tty: "", sessionId: id)), terminator: "")
+    let kind = args.contains("--codex") ? "codex" : (id == nil ? "shell" : "claude")
+    print(launchScript(for: Entry(kind: kind, cwd: args[i + 1], tty: "", sessionId: id)), terminator: "")
     exit(0)
 }
 
 if let i = args.firstIndex(of: "--open-shell"), args.count > i + 1 {
-    // --open-shell <cwd> : open one new Terminal window in that folder.
-    let ok = reopen(Entry(kind: "shell", cwd: args[i + 1], tty: ""))
-    Thread.sleep(forTimeInterval: 1)
+    // --open-shell <cwd> [--bounds left,top,right,bottom] : open one new Terminal window in that folder.
+    var entry = Entry(kind: "shell", cwd: args[i + 1], tty: "")
+    if let b = args.firstIndex(of: "--bounds"), args.count > b + 1 {
+        entry.bounds = args[b + 1].split(separator: ",").compactMap { Int($0) }
+    }
+    let ok = reopen(entry)
+    // Placing the window waits for the new tab to report its tty.
+    RunLoop.main.run(until: Date().addingTimeInterval(entry.bounds == nil ? 1 : 5))
     exit(ok ? 0 : 1)
 }
 

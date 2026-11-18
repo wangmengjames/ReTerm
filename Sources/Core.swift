@@ -5,7 +5,7 @@ import Foundation
 
 struct Entry: Codable {
     var id = UUID()
-    var kind: String            // "claude" or "shell"
+    var kind: String            // "claude", "codex" or "shell"
     var cwd: String
     var tty: String             // e.g. "ttys005"
     var sessionId: String?
@@ -14,12 +14,27 @@ struct Entry: Codable {
     var reopened = false
     /// What the session is about (Claude Code's own window title). nil = not looked up yet, "" = none found.
     var topic: String?
+    /// Frame of the window it was in, as Terminal reports it: left, top, right, bottom.
+    var bounds: [Int]? = nil
+
+    var isSession: Bool { kind != "shell" }
+    /// Identifies what would be reopened, wherever it was recorded.
+    var pinKey: String { sessionId.map { "\(kind):\($0)" } ?? "\(kind):\(cwd)" }
 
     var title: String {
         let folder = (cwd as NSString).lastPathComponent
         if let topic, !topic.isEmpty { return topic }
         if let name, !name.isEmpty { return name }
         return folder.isEmpty ? cwd : folder
+    }
+
+    /// SF Symbol shown next to the entry.
+    var symbol: String {
+        switch kind {
+        case "claude": return "sparkles"
+        case "codex": return "chevron.left.forwardslash.chevron.right"
+        default: return "terminal"
+        }
     }
 
     var shortPath: String { (cwd as NSString).abbreviatingWithTildeInPath }
@@ -38,12 +53,16 @@ struct Snapshot: Codable {
 
 enum Paths {
     static let support: URL = {
+        // RETERM_HOME points ReTerm at another data folder (used for testing).
+        let custom = ProcessInfo.processInfo.environment["RETERM_HOME"]
+            .flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let dir = base.appendingPathComponent("ReTerm", isDirectory: true)
+        let dir = custom ?? base.appendingPathComponent("ReTerm", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
     static let history = support.appendingPathComponent("history.json")
+    static let pins = support.appendingPathComponent("pins.json")
     static let launch: URL = {
         let dir = support.appendingPathComponent("launch", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -104,9 +123,8 @@ enum History {
         guard var all = loadForChange() else { return [] }
         var changed = false
         for s in all.indices {
-            for e in all[s].entries.indices where all[s].entries[e].kind == "claude" && all[s].entries[e].topic == nil {
-                let entry = all[s].entries[e]
-                all[s].entries[e].topic = entry.sessionId.flatMap { sessionTopic(sessionId: $0, cwd: entry.cwd) } ?? ""
+            for e in all[s].entries.indices where all[s].entries[e].isSession && all[s].entries[e].topic == nil {
+                all[s].entries[e].topic = storedTopic(for: all[s].entries[e]) ?? ""
                 changed = true
             }
         }
@@ -135,6 +153,82 @@ enum History {
               let e = all[s].entries.firstIndex(where: { $0.id == entry }) else { return }
         all[s].entries[e].reopened = true
         save(all)
+    }
+
+    static func markReopened(entry: UUID) {
+        guard var all = loadForChange() else { return }
+        for s in all.indices {
+            if let e = all[s].entries.firstIndex(where: { $0.id == entry }) {
+                all[s].entries[e].reopened = true
+                save(all)
+                return
+            }
+        }
+    }
+
+    /// Removes one entry, and its group once that is empty.
+    @discardableResult
+    static func delete(entry: UUID) -> Bool {
+        guard var all = loadForChange() else { return false }
+        for i in all.indices { all[i].entries.removeAll { $0.id == entry } }
+        all.removeAll { $0.entries.isEmpty }
+        return save(all)
+    }
+
+    /// The most recently saved entry that has not been reopened yet.
+    static func lastClosed() -> Entry? {
+        for snapshot in load() where snapshot.closed {
+            if let hit = snapshot.entries.first(where: { !$0.reopened }) { return hit }
+        }
+        return nil
+    }
+}
+
+// MARK: - Pins
+
+/// Entries the user wants to keep at hand. Stored apart from history so they never age out.
+enum Pins {
+    static func load() -> [Entry] { loadForChange() ?? [] }
+
+    /// nil when the file exists but cannot be read, so a save never replaces pins it could not see.
+    private static func loadForChange() -> [Entry]? {
+        guard FileManager.default.fileExists(atPath: Paths.pins.path) else { return [] }
+        guard let data = try? Data(contentsOf: Paths.pins) else { return nil }
+        do {
+            return try JSONDecoder().decode([Entry].self, from: data)
+        } catch {
+            let aside = Paths.support.appendingPathComponent("pins.unreadable-\(Int(Date().timeIntervalSince1970)).json")
+            try? FileManager.default.moveItem(at: Paths.pins, to: aside)
+            return []
+        }
+    }
+
+    @discardableResult
+    private static func save(_ entries: [Entry]) -> Bool {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(entries) else { return false }
+        return (try? data.write(to: Paths.pins, options: .atomic)) != nil
+    }
+
+    static func contains(_ entry: Entry) -> Bool {
+        load().contains { $0.pinKey == entry.pinKey }
+    }
+
+    /// Pins the entry, or unpins it if it is already pinned.
+    @discardableResult
+    static func toggle(_ entry: Entry) -> Bool {
+        guard var all = loadForChange() else { return false }
+        if all.contains(where: { $0.pinKey == entry.pinKey }) {
+            all.removeAll { $0.pinKey == entry.pinKey }
+        } else {
+            var copy = entry
+            copy.id = UUID()
+            copy.reopened = false
+            copy.status = nil
+            all.append(copy)
+        }
+        return save(all)
     }
 }
 
@@ -305,6 +399,12 @@ func sessionTopic(sessionId: String, cwd: String? = nil, userName: String? = nil
     return titles?.custom ?? titles?.generated ?? userName ?? titles?.firstPrompt
 }
 
+/// The topic to store for a saved entry of either kind.
+func storedTopic(for entry: Entry) -> String? {
+    guard let id = entry.sessionId else { return nil }
+    return entry.kind == "codex" ? Codex.topic(sessionId: id) : sessionTopic(sessionId: id, cwd: entry.cwd)
+}
+
 func liveClaudeSessions() -> [Int32: ClaudeSession] {
     var result: [Int32: ClaudeSession] = [:]
     let files = (try? FileManager.default.contentsOfDirectory(at: Paths.claudeSessions, includingPropertiesForKeys: nil)) ?? []
@@ -342,6 +442,11 @@ func detectTerminalTabs(includeTopics: Bool = true) -> [Entry] {
             let topic = includeTopics ? (sessionTopic(sessionId: s.sessionId, cwd: s.cwd, userName: userName) ?? "") : userName
             entries.append(Entry(kind: "claude", cwd: s.cwd, tty: login.tty,
                                  sessionId: s.sessionId, name: s.name, status: s.status, topic: topic))
+        } else if let codex = descendants.first(where: { ($0.comm as NSString).lastPathComponent == "codex" }) {
+            let cwd = workingDirectory(of: codex.pid) ?? NSHomeDirectory()
+            let id = Codex.sessionId(pid: codex.pid, cwd: cwd)
+            let topic = includeTopics ? (id.flatMap { Codex.topic(sessionId: $0) } ?? "") : nil
+            entries.append(Entry(kind: "codex", cwd: cwd, tty: login.tty, sessionId: id, topic: topic))
         } else if let outer = descendants.first {
             // The innermost process is where the user actually is (e.g. a shell started by a script).
             let inner = descendants.last ?? outer
@@ -359,7 +464,8 @@ func shellQuote(_ s: String) -> String {
 }
 
 func launchScript(for entry: Entry) -> String {
-    var lines = ["#!/bin/zsh", "clear"]
+    // The new tab reports its tty so ReTerm can put the window back where it was.
+    var lines = ["#!/bin/zsh", "tty > \(shellQuote(ttyReportFile(for: entry).path)) 2>/dev/null", "clear"]
     lines.append("if ! cd -- \(shellQuote(entry.cwd)); then")
     lines.append("  echo \"ReTerm: folder no longer exists: \"\(shellQuote(entry.cwd))")
     lines.append("  exec \"${SHELL:-/bin/zsh}\" -l")
@@ -368,10 +474,18 @@ func launchScript(for entry: Entry) -> String {
     if entry.kind == "claude", let id = entry.sessionId, validId {
         // Interactive shell so the user's own aliases and PATH apply to `claude`.
         lines.append("exec \"${SHELL:-/bin/zsh}\" -lic 'claude --resume \(id); exec \"${SHELL:-/bin/zsh}\" -l'")
+    } else if entry.kind == "codex" {
+        // Without a known session, Codex's own picker lists the sessions to choose from.
+        let target = (entry.sessionId.flatMap { isValidSessionId($0) ? " " + $0 : nil }) ?? ""
+        lines.append("exec \"${SHELL:-/bin/zsh}\" -lic 'codex resume\(target); exec \"${SHELL:-/bin/zsh}\" -l'")
     } else {
         lines.append("exec \"${SHELL:-/bin/zsh}\" -l")
     }
     return lines.joined(separator: "\n") + "\n"
+}
+
+func ttyReportFile(for entry: Entry) -> URL {
+    Paths.launch.appendingPathComponent("\(entry.id.uuidString).tty")
 }
 
 @discardableResult
@@ -385,7 +499,11 @@ func reopen(_ entry: Entry) -> Bool {
     }
     let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
     let config = NSWorkspace.OpenConfiguration()
+    try? FileManager.default.removeItem(at: ttyReportFile(for: entry))
     NSWorkspace.shared.open([file], withApplicationAt: terminal, configuration: config)
+    if let bounds = entry.bounds, isOnScreen(bounds) {
+        Placement.place(reportFile: ttyReportFile(for: entry), bounds: bounds)
+    }
     return true
 }
 
@@ -511,6 +629,7 @@ func finishTerminalSession(sessionId: String, allowUnfinished: Bool) throws -> F
         throw FinishError.script("\(error)")
     }
     let claudePid = liveClaudeSessions().first(where: { $0.value.sessionId == sessionId })?.key
+    entry.bounds = (try? windowBounds())?[tty]
     guard History.addFinished(entry) else { throw FinishError.notSaved }
     if ids.isEmpty, let claudePid {
         // The tab shares its window with other tabs. Closing the window would close them too, so end

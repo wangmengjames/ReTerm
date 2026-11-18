@@ -17,14 +17,14 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.3.0</string>
+    <string>0.4.0</string>
     <key>CFBundleVersion</key>
-    <string>5</string>
+    <string>6</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSAppleEventsUsageDescription</key>
-    <string>ReTerm asks Terminal (or iTerm2) which windows are open, so it can close them after saving them and bring a Claude Code session's window to the front when you pick it.</string>
+    <string>ReTerm asks Terminal where its windows are so it can close them, switch to them and put reopened ones back in place.</string>
 </dict>
 </plist>

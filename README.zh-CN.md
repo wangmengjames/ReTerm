@@ -28,8 +28,12 @@ ReTerm 是一个很小的 macOS 菜单栏工具。点一下，关掉所有 Termi
 - **恢复单个或全部**：Claude Code 会话用 `claude --resume` 恢复；普通 shell 在原文件夹重新打开。已恢复的条目会打勾。
 - **历史记录**：最近 15 次记录保存在 **Earlier** 里。
 - **Save Snapshot Only**：只记录，不关闭。
+- **窗口回到原来的位置**：重新打开的窗口会回到保存时的位置和大小。
+- **用键盘恢复上一个**：在任何地方按 `⌃⌥⌘T`，就把最近关闭的那个标签页找回来，像浏览器里的 `⌘⇧T`。
+- **搜索与管理**（放大镜图标）：把 ReTerm 记住的所有内容放在一个可搜索的列表里，可以重新打开、置顶或删除；置顶的条目固定显示在面板上方，不会被新记录挤掉。
+- **也支持 Codex CLI 会话**：运行 OpenAI Codex 的 Terminal 标签页会连同会话一起保存，重新打开时用 `codex resume` 恢复。
 - **内置更新**：**Check for Updates…** 一键安装最新版并重启。
-- 小而原生：约 600 行 Swift，无第三方依赖，同时支持 Apple 芯片和 Intel。
+- 小而原生：几千行 Swift，无第三方依赖，同时支持 Apple 芯片和 Intel。
 
 ## 安装
 
@@ -57,7 +61,7 @@ open ~/Applications/ReTerm.app
 
 </details>
 
-第一次使用 **Save & Close** 时，macOS 会询问是否允许 ReTerm 控制 Terminal，请点允许。这个权限只用来查找和关闭 Terminal 窗口。
+第一次使用 **Save & Close** 时，macOS 会询问是否允许 ReTerm 控制 Terminal，请点允许。这个权限只用来查找、切换、关闭 Terminal 窗口和恢复窗口位置。
 
 ## 隐私
 

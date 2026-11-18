@@ -10,6 +10,9 @@ enum PanelAction {
     case finish(LiveSession)
     case reopen(snapshot: UUID, entry: UUID)
     case reopenAll(snapshot: UUID)
+    case reopenPin(entry: UUID)
+    case reopenLast
+    case manage
     case saveAndClose
     case saveOnly
     case installUpdate
@@ -26,6 +29,7 @@ final class PanelModel: ObservableObject {
 
     @Published var live: [LiveSession] = []
     @Published var history: [Snapshot] = []
+    @Published var pins: [Entry] = []
     @Published var openTabs = 0
     @Published var update: Updater.Release?
     @Published var hideTitles = UserDefaults.standard.bool(forKey: PanelModel.hideTitlesKey)
@@ -46,6 +50,7 @@ final class PanelModel: ObservableObject {
     /// Reloads the history now and rescans the sessions in the background (ps and transcripts take ~100 ms).
     func reload() {
         history = History.loadFillingTopics()
+        pins = Pins.load()
         launchAtLogin = SMAppService.mainApp.status == .enabled
         now = Date()
         guard !scanning else {
@@ -136,8 +141,12 @@ struct PanelView: View {
             }
             if model.isSnapshot {
                 // ImageRenderer cannot draw AppKit-backed controls such as Menu.
+                Image(systemName: "magnifyingglass").foregroundColor(.secondary)
                 Image(systemName: "gearshape").foregroundColor(.secondary)
             } else {
+                Button { model.handle(.manage) } label: { Image(systemName: "magnifyingglass") }
+                    .buttonStyle(.borderless)
+                    .help(L("Search and manage everything ReTerm remembers", "搜索和管理 ReTerm 记住的所有内容"))
                 settingsMenu
             }
         }
@@ -149,6 +158,8 @@ struct PanelView: View {
         Menu {
             Button(L("Save Snapshot Only", "只保存快照（不关闭）")) { model.handle(.saveOnly) }
                 .disabled(model.openTabs == 0)
+            Button(L("Reopen Last Closed  \(HotKey.display)", "重新打开上一个关闭的  \(HotKey.display)")) { model.handle(.reopenLast) }
+            Button(L("Search & Manage…", "搜索与管理…")) { model.handle(.manage) }
             Divider()
             Toggle(L("Hide Session Titles", "隐藏会话标题"),
                    isOn: Binding(get: { model.hideTitles }, set: { _ in model.handle(.toggleHideTitles) }))
@@ -190,6 +201,14 @@ struct PanelView: View {
             }
 
             Divider().padding(.vertical, 6).padding(.horizontal, 6)
+
+            if !model.pins.isEmpty {
+                SectionTitle(text: L("Pinned (\(model.pins.count))", "已置顶（\(model.pins.count)）"))
+                ForEach(model.pins, id: \.id) { entry in
+                    HistoryRow(entry: entry, snapshot: nil, model: model)
+                }
+                Divider().padding(.vertical, 6).padding(.horizontal, 6)
+            }
 
             if let latest = model.history.first {
                 SnapshotSection(snapshot: latest, model: model)
@@ -337,15 +356,28 @@ struct SnapshotSection: View {
 
 struct HistoryRow: View {
     let entry: Entry
-    let snapshot: UUID
+    /// The group it is listed in; nil for a pinned entry.
+    let snapshot: UUID?
     @ObservedObject var model: PanelModel
     @StateObject private var hover = Flag()
 
+    private var open: PanelAction {
+        snapshot.map { .reopen(snapshot: $0, entry: entry.id) } ?? .reopenPin(entry: entry.id)
+    }
+
+    private var openHelp: String {
+        switch entry.kind {
+        case "claude": return L("Reopen it in Terminal with the conversation resumed", "在 Terminal 里重新打开，并恢复对话")
+        case "codex": return L("Reopen it in Terminal with the Codex session resumed", "在 Terminal 里重新打开，并恢复 Codex 会话")
+        default: return L("Open a shell in this folder", "在这个文件夹里打开一个 shell")
+        }
+    }
+
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: entry.kind == "claude" ? "sparkles" : "terminal")
+            Image(systemName: snapshot == nil ? "pin.fill" : entry.symbol)
                 .font(.system(size: 11))
-                .foregroundColor(.secondary)
+                .foregroundColor(snapshot == nil ? .orange : .secondary)
                 .frame(width: 14)
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.shown(entry.title, cwd: entry.cwd))
@@ -365,11 +397,8 @@ struct HistoryRow: View {
                     .help(L("Already reopened", "已经重新打开过"))
             }
             PillButton(symbol: "arrow.uturn.backward.circle", hoverSymbol: "arrow.uturn.backward.circle.fill",
-                       title: L("Open", "打开"), tint: .accentColor,
-                       help: entry.kind == "claude"
-                           ? L("Reopen it in Terminal with the conversation resumed", "在 Terminal 里重新打开，并恢复对话")
-                           : L("Open a shell in this folder", "在这个文件夹里打开一个 shell")) {
-                model.handle(.reopen(snapshot: snapshot, entry: entry.id))
+                       title: L("Open", "打开"), tint: .accentColor, help: openHelp) {
+                model.handle(open)
             }
         }
         .opacity(entry.reopened ? 0.6 : 1)
@@ -378,7 +407,7 @@ struct HistoryRow: View {
         .background(RoundedRectangle(cornerRadius: 6).fill(hover.on ? Color.primary.opacity(0.07) : Color.clear))
         .contentShape(Rectangle())
         .onHover { hover.on = $0 }
-        .onTapGesture { model.handle(.reopen(snapshot: snapshot, entry: entry.id)) }
+        .onTapGesture { model.handle(open) }
         .help(entry.cwd)
     }
 }
@@ -527,9 +556,11 @@ func renderPanel(to path: String, dark: Bool, sample: Bool) -> Bool {
             Entry(kind: "shell", cwd: "/Users/me/Downloads", tty: ""),
         ])
         model.history = [finished, closed, closed]
+        model.pins = [Entry(kind: "codex", cwd: "/Users/me/Projects/api", tty: "", sessionId: "c", topic: "API rate limiter")]
         model.openTabs = 3
     } else {
         model.history = History.loadFillingTopics()
+        model.pins = Pins.load()
         model.live = scanLiveSessions(includeTitles: !model.hideTitles)
         model.openTabs = detectTerminalTabs(includeTopics: false).count
     }

@@ -28,6 +28,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.delegate = self
         cleanLaunchFolder()
 
+        HotKey.action = { [weak self] in self?.reopenLastClosed() }
+        HotKey.register()
+        ManageWindowController.shared.onChange = { [weak self] in self?.model.reload() }
+
         // The count of Claude sessions that need you, next to the icon. Reading a few small files, so often is fine.
         refreshBadge()
         let badge = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.refreshBadge() }
@@ -80,6 +84,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             reopenEntry(snapshot: snapshot, entry: entry)
         case .reopenAll(let snapshot):
             reopenAll(snapshot: snapshot)
+        case .reopenPin(let entry):
+            if let pinned = Pins.load().first(where: { $0.id == entry }) { reopen(pinned) }
+        case .reopenLast:
+            closePanel()
+            reopenLastClosed()
+        case .manage:
+            closePanel()
+            ManageWindowController.shared.show()
         case .saveAndClose:
             closePanel()
             saveAndClose()
@@ -100,6 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         case .setLanguage(let language):
             Lang.setting = language
             model.language = language
+            ManageWindowController.shared.languageChanged()
         case .clearHistory:
             History.save([])
         case .quit:
@@ -264,7 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // MARK: Save, close, reopen
 
     private func saveOnly() {
-        let entries = detectTerminalTabs()
+        let entries = withBounds(detectTerminalTabs())
         guard !entries.isEmpty else { return }
         if !History.add(Snapshot(closed: false, entries: entries)) {
             closePanel()
@@ -279,7 +292,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard !entries.isEmpty else { return }
         let claude = entries.filter { $0.kind == "claude" }
         let busy = claude.filter { ($0.status ?? "idle") != "idle" }
-        let shells = entries.count - claude.count
+        let codex = entries.filter { $0.kind == "codex" }.count
+        let shells = entries.count - claude.count - codex
 
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
@@ -287,6 +301,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                               "保存并关闭 \(entries.count) 个 Terminal 标签页？")
         var info = L("\(claude.count) Claude Code session\(claude.count == 1 ? "" : "s"), \(shells) plain shell\(shells == 1 ? "" : "s"). You can reopen each one from ReTerm.",
                      "\(claude.count) 个 Claude Code 会话，\(shells) 个普通 shell。每一个都能在 ReTerm 里重新打开。")
+        if codex > 0 {
+            info = L("\(codex) Codex session\(codex == 1 ? "" : "s"), ", "\(codex) 个 Codex 会话，") + info
+        }
         if !busy.isEmpty {
             info += L("\n\n\(busy.count) Claude session\(busy.count == 1 ? " is" : "s are") still working and will be interrupted:\n",
                       "\n\n有 \(busy.count) 个 Claude 会话还在工作，会被中断：\n")
@@ -311,7 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return
         }
 
-        guard History.add(Snapshot(closed: true, entries: entries)) else {
+        guard History.add(Snapshot(closed: true, entries: withBounds(entries))) else {
             inform(L("The snapshot could not be saved", "没能保存快照"), L("Nothing was closed.", "没有关闭任何东西。"))
             return
         }
@@ -337,6 +354,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func reopenEntry(snapshot sid: UUID, entry eid: UUID) {
         guard let entry = History.load().first(where: { $0.id == sid })?.entries.first(where: { $0.id == eid }) else { return }
         if reopen(entry) { History.markReopened(snapshot: sid, entry: eid) }
+    }
+
+    /// The shortcut: brings back the most recently closed entry that has not been reopened yet.
+    private func reopenLastClosed() {
+        guard let entry = History.lastClosed() else {
+            NSSound.beep()
+            return
+        }
+        if reopen(entry) { History.markReopened(entry: entry.id) }
+        model.reload()
     }
 
     private func reopenAll(snapshot sid: UUID) {

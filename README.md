@@ -32,8 +32,12 @@ If you run several Claude Code sessions at once, you end up with a wall of Termi
 - **Reopen one or all**: Claude Code sessions are resumed with `claude --resume`; plain shells reopen in their folder. Reopened entries get a tick.
 - **History**: the last 15 snapshots are kept under **Earlier**.
 - **Save Snapshot Only**: record without closing anything.
+- **Windows come back where they were**: each reopened window returns to the position and size it had when it was saved.
+- **Reopen the last one from the keyboard**: `⌃⌥⌘T` anywhere brings back the most recently closed tab, like `⌘⇧T` in a browser.
+- **Search & Manage** (the magnifying glass): one searchable list of everything ReTerm remembers. Reopen, pin or delete entries; pinned ones stay at the top of the panel and never age out.
+- **Codex CLI sessions too**: a Terminal tab running OpenAI Codex is saved with its session and reopened with `codex resume`.
 - **Built-in updates**: **Check for Updates…** installs the newest release and relaunches.
-- Small and native: about 600 lines of Swift, no dependencies, universal binary (Apple silicon and Intel).
+- Small and native: a few thousand lines of Swift, no dependencies, universal binary (Apple silicon and Intel).
 
 ## Install
 
@@ -61,7 +65,7 @@ open ~/Applications/ReTerm.app
 
 </details>
 
-The first time you use **Save & Close**, macOS asks whether ReTerm may control Terminal. Allow it. It is only used to find and close Terminal windows.
+The first time you use **Save & Close**, macOS asks whether ReTerm may control Terminal. Allow it. It is only used to find, switch to, close and reposition Terminal windows.
 
 ## How it works
 
