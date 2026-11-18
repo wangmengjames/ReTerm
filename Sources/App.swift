@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         HotKey.action = { [weak self] in self?.reopenLastClosed() }
         HotKey.register()
         ManageWindowController.shared.onChange = { [weak self] in self?.model.reload() }
+        ManageWindowController.shared.hideTitles = { [weak self] in self?.model.hideTitles ?? false }
 
         // The count of Claude sessions that need you, next to the icon. Reading a few small files, so often is fine.
         refreshBadge()

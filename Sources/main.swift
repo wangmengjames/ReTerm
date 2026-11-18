@@ -136,19 +136,50 @@ if args.contains("--self-test") {
     check(Pins.toggle(a) && !Pins.contains(a) && Pins.load().count == 1, "unpin")
     check(a.pinKey == "claude:aaa-1" && c.pinKey == "shell:/tmp/c", "pin keys")
     let f = [100, 100, 700, 500]
-    let t0 = Date()
-    check(Placement.stagger(f, now: t0) == f, "first window keeps its saved frame")
-    check(Placement.stagger(f, now: t0) == [124, 124, 724, 524], "a second window with the same frame is shifted")
-    check(Placement.stagger(f, now: t0) == [148, 148, 748, 548], "and a third further")
-    check(Placement.stagger(f, now: t0.addingTimeInterval(60)) == f, "later, the saved frame is used again")
-    let u1 = "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee", u2 = "0199aaaa-bbbb-7ccc-8ddd-ffffffffffff"
+    let inside: ([Int]) -> Bool = { $0[2] <= 1000 && $0[3] <= 800 }
+    check(Placement.freeFrame(f, occupied: [], fits: inside) == f, "a free saved frame is used as it is")
+    check(Placement.freeFrame(f, occupied: [f], fits: inside) == [124, 124, 724, 524], "an occupied frame is shifted")
+    check(Placement.freeFrame(f, occupied: [f, [124, 124, 724, 524]], fits: inside) == [148, 148, 748, 548], "and shifted again past the next window")
+    check(Placement.freeFrame([400, 400, 990, 790], occupied: [[400, 400, 990, 790]], fits: inside) == nil, "no shift that would leave the screen")
+    check(Placement.freeFrame([400, 400, 2000, 2000], occupied: [], fits: inside) == [400, 400, 2000, 2000], "a free saved frame is kept even if it is large")
+
+    let u1 = "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee", u2 = "0199aaaa-bbbb-7ccc-8ddd-ffffffffffff", u3 = "0199aaaa-bbbb-7ccc-8ddd-000000000003"
     check(Codex.resumedId(inArguments: "node /x/codex.js resume \(u1)") == u1, "codex resume <id> is read from the command line")
     check(Codex.resumedId(inArguments: "/x/bin/codex resume --last") == nil && Codex.resumedId(inArguments: "/x/bin/codex") == nil,
           "no id without one on the command line")
-    check(Codex.settle([1: u1, 2: u1]) { _ in nil } == [:], "two tabs never share a session: neither keeps it when unsure")
-    check(Codex.settle([1: u1, 2: u1]) { $0 == 2 ? u1 : nil } == [2: u1], "the tab started to resume it keeps it")
-    check(Codex.settle([1: u1, 2: u1]) { $0 == 1 ? u2 : nil } == [1: u2], "a tab resumed into another session keeps its own")
-    check(Codex.settle([1: u1, 2: u2]) { _ in nil } == [1: u1, 2: u2], "distinct sessions are left alone")
+    let t = Date(timeIntervalSince1970: 1_800_000_000)
+    func proc(_ pid: Int32, _ start: Double, cwd: String = "/p", resume: String? = nil, open: String? = nil) -> Codex.Running {
+        Codex.Running(pid: pid, cwd: cwd, started: t.addingTimeInterval(start), resumeId: resume, openId: open)
+    }
+    func sess(_ id: String, created: Double, modified: Double, cwd: String = "/p") -> Codex.Session {
+        Codex.Session(id: id, cwd: cwd, created: t.addingTimeInterval(created), modified: t.addingTimeInterval(modified))
+    }
+    check(Codex.match([proc(1, 0)], sessions: [sess(u1, created: 60, modified: 90)]) == [1: u1], "one tab, its own new session")
+    check(Codex.match([proc(1, 0)], sessions: []) == [:], "a tab with nothing sent yet has no session")
+    check(Codex.match([proc(1, 0)], sessions: [sess(u1, created: 60, modified: 90, cwd: "/other")]) == [:], "a session in another folder is not taken")
+    check(Codex.match([proc(1, 0)], sessions: [sess(u2, created: 300, modified: 400), sess(u1, created: 60, modified: 90)]) == [1: u2],
+          "after /new, the newer session")
+    check(Codex.match([proc(1, 0, resume: u1)], sessions: []) == [1: u1], "a resumed tab that has not been typed in keeps its id")
+    check(Codex.match([proc(1, 0, resume: u1)], sessions: [sess(u2, created: 300, modified: 400)]) == [1: u2],
+          "a resumed tab that then did /new shows the new session")
+    check(Codex.match([proc(1, 0, resume: u1), proc(2, 100)], sessions: [sess(u2, created: 160, modified: 500)]) == [1: u1, 2: u2],
+          "an idle resumed tab does not take its neighbour's session")
+    check(Codex.match([proc(1, 0), proc(2, 600)], sessions: [sess(u2, created: 660, modified: 900), sess(u1, created: 60, modified: 800)]) == [1: u1, 2: u2],
+          "two plain tabs opened one after the other each get their own")
+    check(Codex.match([proc(1, 0), proc(2, 10)], sessions: [sess(u2, created: 80, modified: 900), sess(u1, created: 60, modified: 800)]) == [:],
+          "two plain tabs that cannot be told apart get none, rather than a guess")
+    check(Codex.match([proc(1, 0, resume: u3), proc(2, 10, resume: u3)], sessions: []) == [1: u3],
+          "two tabs never share a session, even when both were started to resume it")
+    check(Codex.match([proc(1, 0, open: u1), proc(2, 10)], sessions: [sess(u2, created: 80, modified: 900), sess(u1, created: 60, modified: 800)]) == [1: u1, 2: u2],
+          "an open session file settles it")
+    check(Codex.match([proc(1, 100)], sessions: [sess(u1, created: -5000, modified: 200)]) == [1: u1], "an older session picked inside the tab")
+    check(Codex.match([proc(1, 100), proc(2, 110)], sessions: [sess(u1, created: -5000, modified: 200)]) == [:],
+          "but not when two tabs could have picked it")
+    let probe = Paths.support.appendingPathComponent("open-file-probe.jsonl")
+    FileManager.default.createFile(atPath: probe.path, contents: Data("x".utf8))
+    let held = try? FileHandle(forReadingFrom: probe)
+    check(Codex.openFiles(of: getpid()).contains { $0.hasSuffix("/open-file-probe.jsonl") }, "open files of a process can be listed")
+    try? held?.close()
     // An old history file without the newer fields must still load.
     let old = #"[{"id":"7F2C1D7E-0000-4000-8000-000000000001","date":"2026-11-18T10:00:00Z","closed":true,"entries":[{"id":"7F2C1D7E-0000-4000-8000-000000000002","kind":"claude","cwd":"/tmp/x","tty":"ttys009","sessionId":"old-1","reopened":false}]}]"#
     try? old.write(to: Paths.history, atomically: true, encoding: .utf8)

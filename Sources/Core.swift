@@ -40,6 +40,13 @@ struct Entry: Codable {
     var shortPath: String { (cwd as NSString).abbreviatingWithTildeInPath }
 }
 
+/// A title as shown: itself, or its folder's name while Hide Session Titles is on.
+func displayTitle(_ title: String, cwd: String, hidden: Bool) -> String {
+    guard hidden else { return title }
+    let folder = (cwd as NSString).lastPathComponent
+    return folder.isEmpty ? cwd : folder
+}
+
 struct Snapshot: Codable {
     var id = UUID()
     var date = Date()
@@ -417,7 +424,8 @@ func liveClaudeSessions() -> [Int32: ClaudeSession] {
 }
 
 /// One entry per Terminal.app tab: a Claude Code session if one is running in it, otherwise the shell.
-func detectTerminalTabs(includeTopics: Bool = true) -> [Entry] {
+/// `codexSessions: false` skips working out which session each Codex tab shows (enough for a count).
+func detectTerminalTabs(includeTopics: Bool = true, codexSessions: Bool = true) -> [Entry] {
     let procs = processTable()
     let terminalPids = Set(procs.filter { $0.comm.hasSuffix("/Terminal.app/Contents/MacOS/Terminal") }.map(\.pid))
     let logins = procs.filter { terminalPids.contains($0.ppid) && $0.tty != "??" }
@@ -455,6 +463,7 @@ func detectTerminalTabs(includeTopics: Bool = true) -> [Entry] {
         }
     }
     // All Codex tabs are matched to their sessions together, so two tabs never claim the same one.
+    guard codexSessions else { return entries }
     let codexIds = Codex.sessionIds(for: codexTabs.map { (pid: $0.pid, cwd: entries[$0.index].cwd) })
     for tab in codexTabs {
         let id = codexIds[tab.pid]
@@ -509,11 +518,7 @@ func reopen(_ entry: Entry) -> Bool {
     try? FileManager.default.removeItem(at: ttyReportFile(for: entry))
     NSWorkspace.shared.open([file], withApplicationAt: terminal, configuration: config)
     if let saved = entry.bounds, isOnScreen(saved) {
-        let bounds = Placement.stagger(saved)
-        // A shifted frame that would leave the screen is not applied; Terminal cascades that window itself.
-        if isOnScreen(bounds) {
-            Placement.place(reportFile: ttyReportFile(for: entry), bounds: bounds)
-        }
+        Placement.place(reportFile: ttyReportFile(for: entry), saved: saved)
     }
     return true
 }

@@ -61,7 +61,7 @@ final class PanelModel: ObservableObject {
         let includeTitles = !hideTitles
         queue.async { [weak self] in
             let live = scanLiveSessions(includeTitles: includeTitles)
-            let tabs = detectTerminalTabs(includeTopics: false).count
+            let tabs = detectTerminalTabs(includeTopics: false, codexSessions: false).count
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.live = live
@@ -78,9 +78,7 @@ final class PanelModel: ObservableObject {
 
     /// A title, or its folder's name while titles are hidden.
     func shown(_ title: String, cwd: String) -> String {
-        guard hideTitles else { return title }
-        let folder = (cwd as NSString).lastPathComponent
-        return folder.isEmpty ? cwd : folder
+        displayTitle(title, cwd: cwd, hidden: hideTitles)
     }
 
     /// Only a Terminal session can be closed and later resumed with `claude --resume`.
@@ -562,7 +560,7 @@ func renderPanel(to path: String, dark: Bool, sample: Bool) -> Bool {
         model.history = History.loadFillingTopics()
         model.pins = Pins.load()
         model.live = scanLiveSessions(includeTitles: !model.hideTitles)
-        model.openTabs = detectTerminalTabs(includeTopics: false).count
+        model.openTabs = detectTerminalTabs(includeTopics: false, codexSessions: false).count
     }
     let view = PanelView(model: model)
         .background(dark ? Color(white: 0.17) : Color(white: 0.96))

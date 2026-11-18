@@ -32,19 +32,17 @@ final class ManageWindowController: NSObject, NSTableViewDataSource, NSTableView
         window?.makeFirstResponder(search)
     }
 
-    /// Hide Session Titles was switched.
+    /// Whether Hide Session Titles is on; the app points this at the panel's own setting.
+    var hideTitles: () -> Bool = { false }
+
+    /// Hide Session Titles was switched: only what the rows show changes, and only if they are on screen.
     func settingsChanged() {
-        guard window != nil else { return }
-        reload()
+        guard window?.isVisible == true else { return }
+        applyFilter()
     }
 
-    private var hideTitles: Bool { UserDefaults.standard.bool(forKey: PanelModel.hideTitlesKey) }
-
-    /// The title, or the folder's name while titles are hidden (as the panel does).
     private func shownTitle(_ entry: Entry) -> String {
-        guard hideTitles else { return entry.title }
-        let folder = (entry.cwd as NSString).lastPathComponent
-        return folder.isEmpty ? entry.cwd : folder
+        displayTitle(entry.title, cwd: entry.cwd, hidden: hideTitles())
     }
 
     func languageChanged() {

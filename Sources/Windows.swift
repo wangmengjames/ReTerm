@@ -79,35 +79,59 @@ func setWindowBounds(tty: String, bounds: [Int]) {
     _ = try? runAppleScript(source)
 }
 
-/// Terminal reports frames from the top-left of the main display. True if enough of this one is on a screen,
-/// so a window saved on a monitor that is no longer attached is not sent off-screen.
+/// A frame from Terminal (left, top, right, bottom; origin at the top-left of the main display) as a screen rectangle.
+private func screenRect(_ bounds: [Int]) -> CGRect? {
+    guard bounds.count == 4, let mainHeight = NSScreen.screens.first?.frame.height else { return nil }
+    return CGRect(x: CGFloat(bounds[0]), y: mainHeight - CGFloat(bounds[3]),
+                  width: CGFloat(bounds[2] - bounds[0]), height: CGFloat(bounds[3] - bounds[1]))
+}
+
+/// True if enough of this frame is on a screen, so a window saved on a monitor that is no longer
+/// attached is not sent off-screen.
 func isOnScreen(_ bounds: [Int]) -> Bool {
-    guard bounds.count == 4, bounds[2] - bounds[0] >= 100, bounds[3] - bounds[1] >= 60,
-          let mainHeight = NSScreen.screens.first?.frame.height else { return false }
-    let rect = CGRect(x: CGFloat(bounds[0]), y: mainHeight - CGFloat(bounds[3]),
-                      width: CGFloat(bounds[2] - bounds[0]), height: CGFloat(bounds[3] - bounds[1]))
+    guard let rect = screenRect(bounds), rect.width >= 100, rect.height >= 60 else { return false }
     return NSScreen.screens.contains { screen in
         let overlap = screen.frame.intersection(rect)
         return overlap.width >= 100 && overlap.height >= 60
     }
 }
 
+/// True if the whole frame lies on one screen.
+func isFullyOnScreen(_ bounds: [Int]) -> Bool {
+    guard let rect = screenRect(bounds) else { return false }
+    return NSScreen.screens.contains { $0.frame.contains(rect) }
+}
+
 /// Moves a reopened window to its old frame once the new tab has reported which tty it got.
 /// A tab that joined an existing window (Terminal set to open in tabs) is left where it is.
 enum Placement {
-    private static var recent: [(frame: [Int], at: Date)] = []
+    /// Frames promised to windows that are still opening. Main thread only.
+    private static var pending: [UUID: (frame: [Int], at: Date)] = [:]
 
-    /// Tabs saved from one window share a frame; shift each repeat so reopened windows do not coincide.
-    /// Main thread only.
-    static func stagger(_ bounds: [Int], now: Date = Date()) -> [Int] {
-        recent.removeAll { now.timeIntervalSince($0.at) > 15 }
-        var frame = bounds
-        while recent.contains(where: { $0.frame == frame }) { frame = frame.map { $0 + 24 } }
-        recent.append((frame, now))
+    /// The saved frame, or the nearest free one 24 points down and right when a window already
+    /// sits exactly there (tabs saved from one window share a frame). nil when no free spot is
+    /// left on the screen: Terminal then places the window itself.
+    static func freeFrame(_ saved: [Int], occupied: Set<[Int]>, fits: ([Int]) -> Bool = isFullyOnScreen) -> [Int]? {
+        var frame = saved
+        var steps = 0
+        while occupied.contains(frame) {
+            frame = frame.map { $0 + 24 }
+            steps += 1
+            // The saved frame itself is used as it is; a shifted one must stay wholly on a screen.
+            if steps > 40 || !fits(frame) { return nil }
+        }
         return frame
     }
 
-    static func place(reportFile: URL, bounds: [Int]) {
+    static func place(reportFile: URL, saved: [Int]) {
+        let now = Date()
+        pending = pending.filter { now.timeIntervalSince($0.value.at) < 20 }
+        // Where windows really are now, plus where windows still opening are headed.
+        let existing = (try? windowBounds()).map { Set($0.values) } ?? []
+        guard let bounds = freeFrame(saved, occupied: existing.union(pending.values.map(\.frame))) else { return }
+        let token = UUID()
+        pending[token] = (bounds, now)
+
         var tries = 0
         let timer = Timer(timeInterval: 0.3, repeats: true) { timer in
             tries += 1
@@ -117,10 +141,15 @@ enum Placement {
                     timer.invalidate()
                     try? FileManager.default.removeItem(at: reportFile)
                     setWindowBounds(tty: tty, bounds: bounds)
+                    // From here the window's real position speaks for itself.
+                    pending[token] = nil
                     return
                 }
             }
-            if tries >= 40 { timer.invalidate() }
+            if tries >= 40 {
+                timer.invalidate()
+                pending[token] = nil
+            }
         }
         RunLoop.main.add(timer, forMode: .common)
     }
