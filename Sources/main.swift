@@ -31,14 +31,37 @@ if let i = args.firstIndex(of: "--jump"), args.count > i + 1 {
     }
     switch bringForward(session.jump) {
     case .done:
-        // An editor jump finishes in the background.
-        Thread.sleep(forTimeInterval: 2)
+        // An editor jump finishes in the background and may post its fallback to the main queue.
+        RunLoop.main.run(until: Date().addingTimeInterval(3))
         exit(0)
     case .automationDenied(let app):
         print("error: not allowed to control \(app) (System Settings › Privacy & Security › Automation)")
         exit(1)
     case .failed(let message):
         print("error: \(message)")
+        exit(1)
+    }
+}
+
+if let i = args.firstIndex(of: "--finish"), args.count > i + 1 {
+    // --finish <sessionId> [--force] : save a Terminal session under Finished and close it, as ⌥-clicking its row does.
+    guard let session = scanLiveSessions(includeTitles: false).first(where: { $0.sessionId == args[i + 1] }),
+          session.hostKind == .terminal, case .terminal(_, let ttyPath) = session.jump else {
+        print("error: no running Terminal session with that id")
+        exit(1)
+    }
+    if session.status != .idle && session.status != .fresh && !args.contains("--force") {
+        print("error: the session is \(statusText(session).lowercased()); add --force to finish it anyway")
+        exit(1)
+    }
+    do {
+        let result = try finishTerminalSession(tty: ttyPath.replacingOccurrences(of: "/dev/", with: ""), sessionId: session.sessionId)
+        Thread.sleep(forTimeInterval: 1.5)
+        closeWindows(ids: result.windowIds)
+        print("finished \(result.entry.kind) session in \(result.entry.cwd); closed windows \(result.windowIds)")
+        exit(0)
+    } catch {
+        print("error: \(error)")
         exit(1)
     }
 }

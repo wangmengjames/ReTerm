@@ -30,6 +30,8 @@ struct Snapshot: Codable {
     var date = Date()
     var closed: Bool            // true = windows were closed, false = snapshot only
     var entries: [Entry]
+    /// Sessions marked finished one at a time from the live list, collected per day.
+    var finished: Bool? = nil
 }
 
 // MARK: - Paths
@@ -107,6 +109,19 @@ enum History {
         return all
     }
 
+    /// Adds a session marked finished to today's Finished group, or starts one.
+    @discardableResult
+    static func addFinished(_ entry: Entry, now: Date = Date()) -> Bool {
+        var all = load()
+        if let first = all.first, first.finished == true, Calendar.current.isDate(first.date, inSameDayAs: now) {
+            all[0].entries.insert(entry, at: 0)
+            all[0].date = now
+        } else {
+            all.insert(Snapshot(date: now, closed: true, entries: [entry], finished: true), at: 0)
+        }
+        return save(all)
+    }
+
     static func markReopened(snapshot: UUID, entry: UUID) {
         var all = load()
         guard let s = all.firstIndex(where: { $0.id == snapshot }),
@@ -126,17 +141,19 @@ struct Proc {
 }
 
 @discardableResult
-func run(_ path: String, _ args: [String]) -> String {
+func run(_ path: String, _ args: [String], environment: [String: String]? = nil) -> String {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: path)
     p.arguments = args
+    if let environment { p.environment = environment }
     let out = Pipe()
     p.standardOutput = out
     p.standardError = FileHandle.nullDevice
     do { try p.run() } catch { return "" }
     let data = out.fileHandleForReading.readDataToEndOfFile()
     p.waitUntilExit()
-    return String(data: data, encoding: .utf8) ?? ""
+    // Lenient: one process with non-UTF-8 arguments must not blank the whole ps listing.
+    return String(decoding: data, as: UTF8.self)
 }
 
 func processTable() -> [Proc] {
@@ -273,11 +290,12 @@ func transcriptTitles(_ url: URL) -> TranscriptTitles? {
     return titles
 }
 
-/// The session's topic: its /rename, else a name the user gave it, else Claude Code's
-/// generated title, else the first thing the user typed.
-func sessionTopic(sessionId: String, cwd: String? = nil, userName: String? = nil) -> String? {
-    let titles = transcriptURL(sessionId: sessionId, cwd: cwd).flatMap(transcriptTitles)
-    return titles?.custom ?? userName ?? titles?.generated ?? titles?.firstPrompt
+/// The session's topic, in the order Claude Code's own session list uses: its /rename,
+/// else the generated title, else a name it was given, else the first thing the user typed.
+func sessionTopic(sessionId: String, cwd: String? = nil, userName: String? = nil, transcript: URL?? = nil) -> String? {
+    let url = transcript ?? transcriptURL(sessionId: sessionId, cwd: cwd)
+    let titles = url.flatMap(transcriptTitles)
+    return titles?.custom ?? titles?.generated ?? userName ?? titles?.firstPrompt
 }
 
 func liveClaudeSessions() -> [Int32: ClaudeSession] {
@@ -313,7 +331,7 @@ func detectTerminalTabs(includeTopics: Bool = true) -> [Entry] {
         if let hit = descendants.first(where: { sessions[$0.pid] != nil && ($0.comm as NSString).lastPathComponent == "claude" }),
            let s = sessions[hit.pid] {
             // A name the user chose themselves wins over the generated topic.
-            let userName = (s.nameSource ?? "derived") != "derived" && !(s.name ?? "").isEmpty ? s.name : nil
+            let userName = s.nameSource != "derived" && !(s.name ?? "").isEmpty ? s.name : nil
             let topic = includeTopics ? (sessionTopic(sessionId: s.sessionId, cwd: s.cwd, userName: userName) ?? "") : userName
             entries.append(Entry(kind: "claude", cwd: s.cwd, tty: login.tty,
                                  sessionId: s.sessionId, name: s.name, status: s.status, topic: topic))
@@ -433,6 +451,42 @@ func closeWindows(ids: [Int]) {
     """
     var error: NSDictionary?
     NSAppleScript(source: source)?.executeAndReturnError(&error)
+}
+
+// MARK: - Finish one session
+
+enum FinishError: Error {
+    case gone
+    case automationDenied
+    case script(String)
+    case notSaved
+}
+
+/// Saves one Terminal tab's Claude session under Finished and ends it. Returns the ids of the
+/// windows to close once its processes have exited (none when the tab shares its window).
+func finishTerminalSession(tty: String, sessionId: String) throws -> (entry: Entry, windowIds: [Int]) {
+    guard var entry = detectTerminalTabs().first(where: { $0.tty == tty && $0.sessionId == sessionId }) else {
+        throw FinishError.gone
+    }
+    // Nothing was ever sent, so there is nothing to resume: reopen it as a shell in its folder.
+    let size = transcriptURL(sessionId: sessionId, cwd: entry.cwd)
+        .flatMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize } ?? 0
+    if size == 0 {
+        entry.kind = "shell"
+        entry.sessionId = nil
+    }
+    // Ask Terminal first, so a missing Automation permission stops everything before anything ends.
+    let ids: [Int]
+    do {
+        ids = try windowIds(coveredBy: [tty])
+    } catch CloseError.automationDenied {
+        throw FinishError.automationDenied
+    } catch {
+        throw FinishError.script("\(error)")
+    }
+    guard History.addFinished(entry) else { throw FinishError.notSaved }
+    hangUp(ttys: [tty])
+    return (entry, ids)
 }
 
 /// Sends SIGHUP to everything running on the given ttys, the same signal Terminal sends when a window closes.

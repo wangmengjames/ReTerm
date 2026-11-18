@@ -13,6 +13,7 @@ enum LiveStatus: String, Codable {
     case idle       // finished its turn: your move
     case fresh      // started, nothing sent yet
     case busy       // working
+    case shell      // the user is running a shell command in it
     case unknown
 
     /// Menu order: needs you first, then your turn, then working.
@@ -20,7 +21,7 @@ enum LiveStatus: String, Codable {
         switch self {
         case .waiting: return 0
         case .idle: return 1
-        case .busy: return 2
+        case .busy, .shell: return 2
         case .unknown: return 3
         case .fresh: return 4
         }
@@ -98,9 +99,9 @@ struct SessionRecord {
     /// Background agents and SDK runs write session files too; only sessions someone types into count.
     var isInteractive: Bool { kind == nil || kind == "interactive" }
 
-    /// A name the user chose themselves (not one Claude Code derived).
+    /// A name given to the session (by the user or the desktop app), not one Claude Code derived from the folder.
     var userName: String? {
-        guard (nameSource ?? "derived") != "derived", let name, !name.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        guard nameSource != "derived", let name, !name.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
         return name
     }
 }
@@ -174,7 +175,8 @@ struct ProcRow {
 
 func processRows() -> [Int32: ProcRow] {
     var rows: [Int32: ProcRow] = [:]
-    for line in run("/bin/ps", ["-axww", "-o", "pid=,ppid=,tty=,args="]).split(separator: "\n") {
+    // A UTF-8 locale, or ps escapes non-ASCII bytes (a GUI app started by launchd has no LANG).
+    for line in run("/bin/ps", ["-axww", "-o", "pid=,ppid=,tty=,args="], environment: ["LC_ALL": "en_US.UTF-8"]).split(separator: "\n") {
         let parts = line.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
         guard parts.count >= 3, let pid = Int32(parts[0]), let ppid = Int32(parts[1]) else { continue }
         let args = parts.count > 3 ? parts[3].trimmingCharacters(in: .whitespaces) : ""
@@ -269,8 +271,10 @@ func hostOf(pid: Int32, rows: [Int32: ProcRow]) -> Host {
                 main = parent
                 up += 1
             }
-            let (kind, label) = classifyApp(app)
-            return Host(kind: kind, label: label, appPath: app, appPid: main.pid, tty: tty, rcTty: rcTty, isRemote: isRemote)
+            // The bundle path from the kernel is exact; the one parsed from ps text is the fallback.
+            let bundle = executablePath(main.pid).flatMap(appOf) ?? app
+            let (kind, label) = classifyApp(bundle)
+            return Host(kind: kind, label: label, appPath: bundle, appPid: main.pid, tty: tty, rcTty: rcTty, isRemote: isRemote)
         }
         if c.ppid <= 1 { break }
         current = rows[c.ppid]
@@ -349,7 +353,8 @@ func jumpFor(_ record: SessionRecord, host: Host, locks: [IdeLock]) -> Jump {
 func liveStatus(_ record: SessionRecord, transcript: URL?) -> LiveStatus {
     switch record.status {
     case "waiting": return .waiting
-    case "busy", "shell": return .busy
+    case "busy": return .busy
+    case "shell": return .shell
     case "idle":
         // Claude Code writes a transcript only once the first message is sent.
         let size = transcript.flatMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize } ?? 0
@@ -370,7 +375,7 @@ func scanLiveSessions(includeTitles: Bool = true) -> [LiveSession] {
         let isRemoteControl = host.isRemote && r.entrypoint == "sdk-cli"
         let transcript = transcriptURL(sessionId: r.sessionId, cwd: r.cwd)
         let folder = (r.cwd as NSString).lastPathComponent
-        let title = (includeTitles ? sessionTopic(sessionId: r.sessionId, cwd: r.cwd, userName: r.userName) : r.userName)
+        let title = (includeTitles ? sessionTopic(sessionId: r.sessionId, cwd: r.cwd, userName: r.userName, transcript: transcript) : r.userName)
             ?? r.name.flatMap { $0.isEmpty ? nil : $0 } ?? (folder.isEmpty ? r.cwd : folder)
         var detail: String?
         if isRemoteControl {
@@ -417,6 +422,7 @@ func statusText(_ s: LiveSession) -> String {
     case .waiting: return s.waitingFor.map { waitingReasons[$0] ?? $0 } ?? "Needs you"
     case .idle: return "Your turn"
     case .busy: return "Working"
+    case .shell: return "In shell"
     case .fresh: return "New"
     case .unknown: return "Unknown"
     }
@@ -445,6 +451,7 @@ private func terminalScript(_ tty: String) -> String {
     """
     set wanted to "\(tty)"
     if not (application "Terminal" is running) then return "missing"
+    with timeout of 5 seconds
     tell application "Terminal"
         set found to (every window whose (tty of every tab) contains wanted)
         if (count of found) is 0 then return "missing"
@@ -457,6 +464,7 @@ private func terminalScript(_ tty: String) -> String {
         set frontmost of w to true
         return "ok"
     end tell
+    end timeout
     """
 }
 
@@ -465,6 +473,7 @@ private func itermScript(_ tty: String) -> String {
     """
     set wanted to "\(tty)"
     if not (application "iTerm2" is running) then return "missing"
+    with timeout of 5 seconds
     tell application "iTerm2"
         set wids to id of every window
         repeat with k from 1 to count of wids
@@ -484,6 +493,7 @@ private func itermScript(_ tty: String) -> String {
             end repeat
         end repeat
     end tell
+    end timeout
     return "missing"
     """
 }

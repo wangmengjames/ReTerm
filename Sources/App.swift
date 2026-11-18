@@ -123,7 +123,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let live = scanLiveSessions(includeTitles: !hideTitles)
         shownLive = Dictionary(live.map { ($0.sessionId, $0) }, uniquingKeysWith: { a, _ in a })
         refreshBadge()
-        let head = NSMenuItem(title: live.isEmpty ? "No Claude Code sessions running" : "Claude Code Sessions (\(live.count))",
+        let head = NSMenuItem(title: live.isEmpty ? "No Claude Code sessions running"
+                                : "Claude Code Sessions (\(live.count))  ·  hold ⌥ to finish one",
                               action: nil, keyEquivalent: "")
         head.isEnabled = false
         menu.addItem(head)
@@ -141,7 +142,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else {
                 i.toolTip = "Bring this session's window to the front (\(session.cwd))"
             }
+            // Holding ⌥ turns the row into "finished": save it under Finished and close its window.
+            i.keyEquivalentModifierMask = []
             menu.addItem(i)
+            menu.addItem(finishItem(for: session))
+        }
+    }
+
+    private func finishItem(for session: LiveSession) -> NSMenuItem {
+        let name = shown(session.title, cwd: session.cwd)
+        let finish: NSMenuItem
+        if session.hostKind == .terminal, case .terminal(let app, _) = session.jump, app == "Terminal" {
+            finish = item("Finished: Save & Close “\(name)”", #selector(finishSession(_:)))
+            finish.representedObject = session.sessionId
+            finish.toolTip = "Close this session's window and keep it under Finished, ready to reopen."
+        } else {
+            finish = NSMenuItem(title: "\(name)  —  only Terminal sessions can be finished here", action: nil, keyEquivalent: "")
+            finish.isEnabled = false
+        }
+        finish.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: "Finished")
+        finish.keyEquivalentModifierMask = .option
+        finish.isAlternate = true
+        return finish
+    }
+
+    @objc private func finishSession(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String, let session = shownLive[id],
+              case .terminal(_, let ttyPath) = session.jump else { return }
+        let tty = ttyPath.replacingOccurrences(of: "/dev/", with: "")
+        let name = shown(session.title, cwd: session.cwd)
+        // Only a session that has finished its turn closes without asking.
+        let current = scanLiveSessions(includeTitles: false).first(where: { $0.sessionId == id })
+        if let current, current.status != .idle && current.status != .fresh {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "“\(name)” is not finished"
+            alert.informativeText = "It is \(statusText(current).lowercased()) and will be interrupted. It is kept under Finished, so you can reopen it later."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Finish Anyway")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        do {
+            let result = try finishTerminalSession(tty: tty, sessionId: id)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                closeWindows(ids: result.windowIds)
+            }
+        } catch FinishError.gone {
+            NSApp.activate(ignoringOtherApps: true)
+            inform("That session has already ended", "Nothing was saved or closed.")
+        } catch FinishError.automationDenied {
+            NSApp.activate(ignoringOtherApps: true)
+            explainAutomation(app: "Terminal", consequence: "\n\nNothing was closed.")
+        } catch FinishError.notSaved {
+            NSApp.activate(ignoringOtherApps: true)
+            inform("The session could not be saved", "Nothing was closed.")
+        } catch {
+            NSApp.activate(ignoringOtherApps: true)
+            inform("Could not talk to Terminal", "\(error)\n\nNothing was closed.")
         }
     }
 
@@ -151,6 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .waiting: return ("exclamationmark.circle.fill", .systemOrange)
             case .idle: return ("checkmark.circle.fill", .systemGreen)
             case .busy: return ("circle.dotted", .systemBlue)
+            case .shell: return ("terminal", .systemTeal)
             case .fresh: return ("circle", .secondaryLabelColor)
             case .unknown: return ("questionmark.circle", .secondaryLabelColor)
             }
@@ -258,6 +317,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func heading(_ snapshot: Snapshot) -> String {
+        if snapshot.finished == true {
+            let day = Calendar.current.isDateInToday(snapshot.date) ? "today"
+                : DateFormatter.localizedString(from: snapshot.date, dateStyle: .medium, timeStyle: .none)
+            return "Finished \(day) (\(snapshot.entries.count))"
+        }
         let when = relative.localizedString(for: snapshot.date, relativeTo: Date())
         return "\(snapshot.closed ? "Closed" : "Saved") \(when) (\(snapshot.entries.count))"
     }
