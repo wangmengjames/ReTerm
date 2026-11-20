@@ -268,6 +268,14 @@ if let i = args.firstIndex(of: "--close-tty"), args.count > i + 1 {
     }
 }
 
+if args.contains("--update-claude") {
+    // --update-claude : run `claude update` as the panel's Update Claude Code command does, without closing anything.
+    let result = updateClaudeCode()
+    print(result.output)
+    print(result.ok ? "ok, claude \(result.version ?? "?")" : "error: claude update failed")
+    exit(result.ok ? 0 : 1)
+}
+
 if args.contains("--check-update") || args.contains("--self-update") {
     // --check-update : print the latest released version. --self-update : install it over this bundle.
     Updater.fetchLatest { result in

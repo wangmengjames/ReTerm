@@ -14,6 +14,7 @@ enum PanelAction {
     case reopenLast
     case manage
     case saveAndClose
+    case updateClaude
     case saveOnly
     case installUpdate
     case checkForUpdates
@@ -32,6 +33,8 @@ final class PanelModel: ObservableObject {
     @Published var history: [Snapshot] = []
     @Published var pins: [Entry] = []
     @Published var openTabs = 0
+    /// True while `claude update` runs between closing the windows and reopening them.
+    @Published var updatingClaude = false
     @Published var update: Updater.Release?
     @Published var hideTitles = UserDefaults.standard.bool(forKey: PanelModel.hideTitlesKey)
     @Published var autoRecord = Tracker.enabled
@@ -269,20 +272,36 @@ struct PanelView: View {
     }
 
     private var footer: some View {
-        HStack {
-            Button(L("Save & Close All Terminal Windows (\(model.openTabs))…",
-                     "保存并关闭所有 Terminal 窗口（\(model.openTabs)）…")) {
-                model.handle(.saveAndClose)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button(L("Save & Close All Terminal Windows (\(model.openTabs))…",
+                         "保存并关闭所有 Terminal 窗口（\(model.openTabs)）…")) {
+                    model.handle(.saveAndClose)
+                }
+                .disabled(model.openTabs == 0 || model.updatingClaude)
+                .help(L("Record every Terminal tab, then close them all. Each one can be reopened from this panel.",
+                        "记录所有 Terminal 标签页后全部关闭，之后每一个都能在这个面板里重新打开。"))
+                Spacer()
+                if model.isSnapshot {
+                    Text(L("Quit", "退出")).foregroundColor(.accentColor)
+                } else {
+                    Button(L("Quit", "退出")) { model.handle(.quit) }
+                        .buttonStyle(.borderless)
+                }
             }
-            .disabled(model.openTabs == 0)
-            .help(L("Record every Terminal tab, then close them all. Each one can be reopened from this panel.",
-                    "记录所有 Terminal 标签页后全部关闭，之后每一个都能在这个面板里重新打开。"))
-            Spacer()
-            if model.isSnapshot {
-                Text(L("Quit", "退出")).foregroundColor(.accentColor)
-            } else {
-                Button(L("Quit", "退出")) { model.handle(.quit) }
-                    .buttonStyle(.borderless)
+            HStack(spacing: 6) {
+                Button(model.openTabs == 0 ? L("Update Claude Code…", "更新 Claude Code…")
+                       : L("Close All, Update Claude Code & Reopen…", "全部关闭、更新 Claude Code 再重新打开…")) {
+                    model.handle(.updateClaude)
+                }
+                .disabled(model.updatingClaude)
+                .help(L("Save and close every Terminal tab, run “claude update”, then open the same tabs again so each session resumes on the new version.",
+                        "保存并关闭所有 Terminal 标签页，运行“claude update”，再把原来的标签页重新打开，让每个会话在新版本上继续。"))
+                if model.updatingClaude {
+                    if !model.isSnapshot { ProgressView().controlSize(.small).scaleEffect(0.7) }
+                    Text(L("Updating Claude Code…", "正在更新 Claude Code…"))
+                        .font(.caption).foregroundColor(.secondary)
+                }
             }
         }
         .controlSize(.small)

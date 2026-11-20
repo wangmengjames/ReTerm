@@ -29,6 +29,7 @@ If you run several Claude Code sessions at once, you end up with a wall of Termi
 - **Hide Session Titles** (in ⚙︎ settings): shows folder names instead of session titles, for screen sharing.
 - **English or Chinese**: follows the system language, or pick one in ⚙︎ settings.
 - **Save & Close All Terminal Windows**: records every open Terminal tab, then closes them. Warns you first if a Claude session is still working.
+- **Close All, Update Claude Code & Reopen**: saves and closes every Terminal tab, runs `claude update`, then opens the same tabs again, so each Claude session resumes on the new version. If the update fails, the tabs still come back and ReTerm shows what `claude update` said.
 - **Entries you can recognise**: each one shows the session's title (the same one Claude Code puts in the window title bar) and its folder.
 - **Reopen one or all**: Claude Code sessions are resumed with `claude --resume`; plain shells reopen in their folder. Reopened entries get a tick.
 - **History**: everything from today is shown open; earlier days (the last 30 groups) are kept under **Earlier**.
@@ -94,6 +95,7 @@ History is stored locally in `~/Library/Application Support/ReTerm/history.json`
 ~/Applications/ReTerm.app/Contents/MacOS/ReTerm --live          # running Claude Code sessions, as the panel lists them
 ~/Applications/ReTerm.app/Contents/MacOS/ReTerm --jump <id>     # bring that session's window to the front
 ~/Applications/ReTerm.app/Contents/MacOS/ReTerm --finish <id>   # save that Terminal session under Finished and close it
+~/Applications/ReTerm.app/Contents/MacOS/ReTerm --update-claude # run `claude update` only, closing nothing
 ~/Applications/ReTerm.app/Contents/MacOS/ReTerm --list          # tabs that would be saved now
 ~/Applications/ReTerm.app/Contents/MacOS/ReTerm --history       # saved snapshots
 ~/Applications/ReTerm.app/Contents/MacOS/ReTerm --check-update  # current and latest version

@@ -576,6 +576,48 @@ func reopen(_ entry: Entry) -> Bool {
     return true
 }
 
+// MARK: - Updating Claude Code
+
+struct ClaudeUpdate {
+    let ok: Bool
+    let output: String
+    /// What `claude --version` prints afterwards, such as "2.1.328".
+    let version: String?
+}
+
+/// Runs a command line in the user's interactive login shell, so their PATH and aliases apply, as when reopening.
+func runInUserShell(_ command: String, timeout: TimeInterval) -> (status: Int32?, output: String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
+    p.arguments = ["-lic", command]
+    p.standardInput = FileHandle.nullDevice
+    let out = Pipe()
+    p.standardOutput = out
+    p.standardError = out
+    do { try p.run() } catch { return (nil, "\(error.localizedDescription)") }
+    let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+    DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
+    let data = out.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    killer.cancel()
+    return (p.terminationReason == .exit ? p.terminationStatus : nil, String(decoding: data, as: UTF8.self))
+}
+
+/// Runs `claude update` and waits for it (up to five minutes). Call it off the main thread.
+func updateClaudeCode() -> ClaudeUpdate {
+    let result = runInUserShell("claude update", timeout: 300)
+    let version = runInUserShell("claude --version", timeout: 20).output
+        .split(whereSeparator: { $0 == " " || $0 == "\n" })
+        .first { $0.first?.isNumber == true && $0.contains(".") }
+        .map(String.init)
+    // Drop colour codes and blank lines so the text reads well in an alert.
+    let plain = result.output
+        .replacingOccurrences(of: "\u{1B}\\[[0-9;?]*[A-Za-z]", with: "", options: .regularExpression)
+        .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        .suffix(12).joined(separator: "\n")
+    return ClaudeUpdate(ok: result.status == 0, output: plain, version: version)
+}
+
 func cleanLaunchFolder() {
     let files = (try? FileManager.default.contentsOfDirectory(at: Paths.launch, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
     let cutoff = Date().addingTimeInterval(-86400)

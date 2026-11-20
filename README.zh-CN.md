@@ -25,6 +25,7 @@ ReTerm 是一个很小的 macOS 菜单栏工具。点一下，关掉所有 Termi
 - **隐藏会话标题**（在 ⚙︎ 设置里）：用文件夹名代替会话标题，适合共享屏幕时使用。
 - **中文或英文**：默认跟随系统语言，也可以在 ⚙︎ 设置里选。
 - **Save & Close All Terminal Windows**：记录所有打开的 Terminal 标签页后全部关闭。如果有 Claude 会话还在工作，会先提醒。
+- **Close All, Update Claude Code & Reopen（全部关闭、更新 Claude Code 再重新打开）**：保存并关闭所有 Terminal 标签页，运行 `claude update`，再把原来的标签页重新打开，每个 Claude 会话在新版本上继续。更新失败时标签页照样会恢复，并显示 `claude update` 的输出。
 - **一眼能认出来的条目**：每条显示会话标题（就是 Claude Code 写在窗口标题栏上的那句话）和所在文件夹。
 - **恢复单个或全部**：Claude Code 会话用 `claude --resume` 恢复；普通 shell 在原文件夹重新打开。已恢复的条目会打勾。
 - **历史记录**：今天的记录全部展开显示；更早的（最近 30 组）收在 **更早** 里。

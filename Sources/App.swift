@@ -99,6 +99,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         case .saveAndClose:
             closePanel()
             saveAndClose()
+        case .updateClaude:
+            closePanel()
+            updateClaudeAndReopen()
         case .saveOnly:
             saveOnly()
         case .installUpdate:
@@ -346,6 +349,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         hangUp(ttys: entries.map(\.tty))
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             closeWindows(ids: ids)
+        }
+    }
+
+    /// Saves and closes every Terminal tab, runs `claude update`, then opens the same tabs again.
+    private func updateClaudeAndReopen() {
+        guard !model.updatingClaude else { return }
+        let entries = detectTerminalTabs()
+        let claude = entries.filter { $0.kind == "claude" }
+        let busy = claude.filter { ($0.status ?? "idle") != "idle" }
+        let codex = entries.filter { $0.kind == "codex" }.count
+        let shells = entries.count - claude.count - codex
+
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        if entries.isEmpty {
+            alert.messageText = L("Update Claude Code?", "更新 Claude Code？")
+            alert.informativeText = L("No Terminal tabs are open, so ReTerm will only run “claude update”.",
+                                      "现在没有打开的 Terminal 标签页，ReTerm 只会运行“claude update”。")
+        } else {
+            alert.messageText = L("Close \(entries.count) Terminal tab\(entries.count == 1 ? "" : "s"), update Claude Code and reopen \(entries.count == 1 ? "it" : "them")?",
+                                  "关闭 \(entries.count) 个 Terminal 标签页、更新 Claude Code，再重新打开？")
+            var info = L("\(claude.count) Claude Code session\(claude.count == 1 ? "" : "s"), \(shells) plain shell\(shells == 1 ? "" : "s"). ReTerm saves them, closes them, runs “claude update”, then opens each one again; Claude sessions resume where they stopped. Sessions in other apps are left alone.",
+                         "\(claude.count) 个 Claude Code 会话，\(shells) 个普通 shell。ReTerm 会先保存再关闭它们，运行“claude update”，然后逐个重新打开；Claude 会话会从停下的地方继续。其他 App 里的会话不受影响。")
+            if codex > 0 {
+                info = L("\(codex) Codex session\(codex == 1 ? "" : "s"), ", "\(codex) 个 Codex 会话，") + info
+            }
+            if !busy.isEmpty {
+                info += L("\n\n\(busy.count) Claude session\(busy.count == 1 ? " is" : "s are") still working and will be interrupted:\n",
+                          "\n\n有 \(busy.count) 个 Claude 会话还在工作，会被中断：\n")
+                    + busy.map { "• \(model.shown($0.title, cwd: $0.cwd))" }.joined(separator: "\n")
+                alert.alertStyle = .warning
+            }
+            alert.informativeText = info
+        }
+        alert.addButton(withTitle: entries.isEmpty ? L("Update", "更新") : L("Close, Update & Reopen", "关闭、更新并重新打开"))
+        alert.addButton(withTitle: L("Cancel", "取消"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        var snapshotId: UUID?
+        if !entries.isEmpty {
+            let ids: [Int]
+            do {
+                ids = try windowIds(coveredBy: entries.map(\.tty))
+            } catch CloseError.automationDenied {
+                explainAutomation(app: "Terminal", consequence: L("\n\nNothing was closed or updated.", "\n\n没有关闭或更新任何东西。"))
+                return
+            } catch {
+                inform(L("Could not talk to Terminal", "没能和 Terminal 通信"),
+                       "\(error)" + L("\n\nNothing was closed or updated.", "\n\n没有关闭或更新任何东西。"))
+                return
+            }
+            let snapshot = Snapshot(closed: true, entries: withBounds(entries))
+            guard History.add(snapshot) else {
+                inform(L("The snapshot could not be saved", "没能保存快照"), L("Nothing was closed or updated.", "没有关闭或更新任何东西。"))
+                return
+            }
+            snapshotId = snapshot.id
+            Tracker.shared.suppress(sessionIds: entries.compactMap(\.sessionId))
+            hangUp(ttys: entries.map(\.tty))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { closeWindows(ids: ids) }
+        }
+
+        model.updatingClaude = true
+        // Give the closed sessions a moment to write their last lines before the update starts.
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + (entries.isEmpty ? 0 : 2.5)) { [weak self] in
+            let result = updateClaudeCode()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.model.updatingClaude = false
+                // Reopen whether or not the update worked: the windows must come back either way.
+                if let snapshotId { self.reopenAll(snapshot: snapshotId) }
+                self.model.reload()
+                if !result.ok {
+                    NSApp.activate(ignoringOtherApps: true)
+                    self.inform(L("Claude Code could not be updated", "没能更新 Claude Code"),
+                                (result.output.isEmpty ? L("“claude update” gave no output.", "“claude update”没有输出。") : result.output)
+                                + (snapshotId == nil ? "" : L("\n\nYour Terminal tabs were reopened on the version you had.", "\n\n你的 Terminal 标签页已经用原来的版本重新打开。")))
+                } else if snapshotId == nil {
+                    NSApp.activate(ignoringOtherApps: true)
+                    self.inform(L("Claude Code \(result.version ?? "") is up to date", "Claude Code \(result.version ?? "") 已是最新"), result.output)
+                }
+            }
         }
     }
 
